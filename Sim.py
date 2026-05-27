@@ -1,8 +1,9 @@
 import numpy as np
 import matplotlib.pyplot as plt
-from dataclasses import dataclass, field
+from matplotlib.animation import FFMpegWriter
 from typing import Tuple
 from Config import *
+from SLACE import EKFSLACE
 
 """
 SLACE.py
@@ -94,7 +95,7 @@ class SimCam:
 
 class LiveVisualizer:
     """Isolated rendering engine for live EKF SLACE monitoring."""
-    def __init__(self, gt_track: np.ndarray, map_skip_val: int = 10):
+    def __init__(self, gt_track: np.ndarray, map_skip_val: int = 10, record_video: bool = False, video_path: str = "slace.mp4"):
         self.map_skip_val = map_skip_val
         
         plt.ion()
@@ -126,6 +127,12 @@ class LiveVisualizer:
         # Storage for trajectory trails
         self.true_path_x, self.true_path_y = [], []
         self.est_path_x, self.est_path_y = [], []
+        self.record_video = record_video
+        self.writer = None
+
+        if self.record_video:
+            self.writer = FFMpegWriter(fps=30, metadata=dict(artist="SLACE"), bitrate=1800)
+            self.writer.setup(self.fig, video_path, dpi=100)
 
     def update(self, step: int, sim: Sim, ekf: EKFSLACE, obs: Observation):
         """Updates the plot data buffers and redraws the canvas."""
@@ -171,3 +178,10 @@ class LiveVisualizer:
             
         self.fig.canvas.draw()
         self.fig.canvas.flush_events()
+
+        if self.record_video:
+            self.writer.grab_frame()
+    
+    def close(self):
+        if self.record_video and self.writer is not None:
+            self.writer.finish()

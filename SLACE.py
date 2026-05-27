@@ -273,7 +273,7 @@ if __name__ == "__main__":
     ekf = EKFSLACE(ekf_cfg, init_pose, init_map)
     
     # init vis
-    visualizer = LiveVisualizer(gt_track, map_skip_val=10)
+    visualizer = LiveVisualizer(gt_track, map_skip_val=10, record_video=False, video_path="slace.mp4")
     
     # loop
     for step in range(sim_cfg.sim_steps):
@@ -295,3 +295,4 @@ if __name__ == "__main__":
         
     plt.ioff()
     plt.show() # Keep the plot open at the end
+    visualizer.close() # Stop recording

@@ -5,6 +5,8 @@ SLACE (Simultaneous Localisation And Curve Estimation) is a lightweight EKF-base
 
 The system estimates both robot pose and a sparse centreline map at the same time using local observations of a track boundary/line. Instead of using traditional landmarks, the map is represented as a deformable polyline which is updated online as new observations arrive.
 
+Implementation makes use of a sliding window iteration structure to only operate on nearby points correlated to current measurements, acheiving O(1) execution time irrespective of current map size.
+
 The current setup uses a simulated camera pipeline which:
 
 * samples points from a ground truth track
