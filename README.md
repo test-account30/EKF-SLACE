@@ -55,3 +55,208 @@ A live visualisation window should open showing:
 ## Notes
 
 This project is mainly experimental/research-style code rather than a polished robotics framework. The current implementation uses a sparse polyline representation rather than splines or occupancy grids.
+
+## Appendix
+
+This section summarises the SLACE EKF formulation using a simplified and GitHub-safe notation.
+
+---
+
+### 1. State Representation
+
+Robot state:
+
+$$
+x = [x, y, \theta]^T
+$$
+
+Map representation (polyline nodes):
+
+$$
+M = [x_1, y_1, x_2, y_2, ..., x_N, y_N]^T
+$$
+
+Covariances:
+
+$$
+P \in \mathbb{R}^{3 \times 3}, \quad S_M \in \mathbb{R}^{2N \times 2N}
+$$
+
+---
+
+### 2. Motion Model (Prediction Step)
+
+$$
+x_{k+1} = x_k + v \Delta t \cos(\theta)
+$$
+
+$$
+y_{k+1} = y_k + v \Delta t \sin(\theta)
+$$
+
+$$
+\theta_{k+1} = \theta_k + \omega \Delta t
+$$
+
+Covariance propagation:
+
+$$
+P = F P F^T + Q
+$$
+
+Jacobian:
+
+$$
+F =
+\begin{bmatrix}
+1 & 0 & -v \Delta t \sin(\theta) \\
+0 & 1 & v \Delta t \cos(\theta) \\
+0 & 0 & 1
+\end{bmatrix}
+$$
+
+---
+
+### 3. Line Observation Model (Frenet Frame)
+
+Measurement from local point cloud:
+
+$$
+z = [b, \theta_l]^T
+$$
+
+where:
+- b = lateral offset to line
+- θ_l = local line direction
+
+Predicted measurement:
+
+$$
+z_{hat} = [-C \cdot n, -atan2(t_y, t_x)]^T
+$$
+
+Residual:
+
+$$
+r = z - z_{hat}
+$$
+
+---
+
+### 4. EKF Update (Robot Pose)
+
+Jacobian:
+
+$$
+H =
+\begin{bmatrix}
+n_x & n_y & 0 \\
+0 & 0 & 1
+\end{bmatrix}
+$$
+
+Innovation covariance:
+
+$$
+S = H P H^T + R + S_M
+$$
+
+Kalman gain:
+
+$$
+K = P H^T S^{-1}
+$$
+
+State update:
+
+$$
+x = x + K r
+$$
+
+Covariance update:
+
+$$
+P = (I - K H) P (I - K H)^T + K R K^T
+$$
+
+---
+
+### 5. Map Update (Sliding Window EKF)
+
+Global observation transform:
+
+$$
+z_{global} = [x, y] + R(\theta) z_{local}
+$$
+
+Residual:
+
+$$
+r_M = z_{global} - C(s)
+$$
+
+Map update:
+
+$$
+M_{active} = M_{active} + K_M r_M
+$$
+
+---
+
+### 6. Sliding Window
+
+Only map nodes near current arc-length s are updated:
+
+$$
+W(s) = \{ i : |s_i - s| < w \}
+$$
+
+This gives constant-time updates:
+
+$$
+O(|W|) \approx O(1)
+$$
+
+---
+
+### 7. Map Augmentation
+
+New node is added when:
+
+$$
+d_{forward} > d_{add}, \quad |d_{lat}| < w_{lane}
+$$
+
+New point:
+
+$$
+p_{new} = p_{last} + d_{add} t
+$$
+
+---
+
+### 8. Loop Closure (Simple Alignment)
+
+Angle correction:
+
+$$
+d\theta = \theta_{start} - \theta_{end}
+$$
+
+Rotation:
+
+$$
+R =
+\begin{bmatrix}
+cos(d\theta) & -sin(d\theta) \\
+sin(d\theta) & cos(d\theta)
+\end{bmatrix}
+$$
+
+Position correction:
+
+$$
+p = R(p - p_a) + p_a + d_p
+$$
+
+---
