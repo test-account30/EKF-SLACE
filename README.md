@@ -35,6 +35,7 @@ Install dependencies:
 
 ```bash
 pip install numpy matplotlib
+winget install "FFmpeg (Essentials Build)" 
 ```
 
 Run the simulator:
