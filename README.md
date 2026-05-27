@@ -1,9 +1,15 @@
 # EKF-SLACE
 # SLACE
 
-SLACE (Simultaneous Localisation And Curve Estimation) is a lightweight EKF-based curve SLAM project written in Python.
+SLACE (Simultaneous Localisation And Curve Estimation) is a lightweight EKF-based curve estimation system written in Python.
 
-The system estimates both robot pose and a sparse centreline map at the same time using local observations of a track boundary/line. Instead of using traditional landmarks, the map is represented as a deformable polyline which is updated online as new observations arrive.
+The system jointly estimates robot pose and a sparse centreline representation of the environment using local observations of a track boundary or line structure. Instead of discrete landmark points, the map is represented as a deformable polyline that evolves online as new measurements are incorporated.
+
+A sliding-window update scheme is used so that each measurement only affects a local subset of nearby map nodes. This keeps computation bounded with respect to map length, enabling near constant-time updates in practice for long trajectories.
+
+Rather than aiming for globally consistent Cartesian reconstruction of the environment, SLACE is designed to maintain a locally smooth and stable Frenet-frame representation of the observed path. This makes it well-suited for finite-horizon control applications such as MPC, where local curvature and tangent consistency are more important than global map accuracy.
+
+https://github.com/user-attachments/assets/2ed6bc52-8736-458a-b4d4-5efe82431039
 
 The current setup uses a simulated camera pipeline which:
 
