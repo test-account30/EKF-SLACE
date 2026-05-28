@@ -4,33 +4,16 @@ from typing import List, Tuple
 from Sim import *
 from Config import *
 from Controller import PurePursuitController
+from utils import normalize_angle
 
 """
 SLACE.py
 Description:
     EKF SLACE (Simultaneous Localization And Curve Estimation)
-    Multi-rate augmented state EKF fusing high-rate IMU, 3-DOF holonomic odometry, and polylines.
+    Light(ish) weight curve-based SLAM using a deformable polyline representation
 Author:
     Matthew Allen
 """
-
-def compute_frenet_frame(pts: np.ndarray) -> Tuple[np.ndarray, np.ndarray, float, float]:
-    """Computes line fit, normal, b_meas, and theta_meas from local points via SVD."""
-    mean_pt = np.mean(pts, axis=0)
-    _, _, Vh = np.linalg.svd(pts - mean_pt)
-    t = Vh[0] if Vh[0, 0] >= 0 else -Vh[0]
-    n = np.array([-t[1], t[0]])
-    b = -np.dot(mean_pt, n)
-    theta = -np.arctan2(t[1], t[0])
-    return t, n, b, theta
-
-
-import numpy as np
-import matplotlib.pyplot as plt
-from typing import List, Tuple
-from Sim import *
-from Config import *
-from Controller import PurePursuitController
 
 def compute_frenet_frame(pts: np.ndarray) -> Tuple[np.ndarray, np.ndarray, float, float]:
     """Computes line fit, normal, b_meas, and theta_meas from local points via SVD."""
@@ -47,31 +30,23 @@ class EKFSLACE:
     """Core EKF SLACE (Simultaneous Localization And Curve Estimation)"""
     def __init__(self, config: EKFConfig, initial_pose: np.ndarray, initial_map_pts: np.ndarray):
         self.cfg = config
-        
-        # Build 6x6 continuous process noise matrix to match 6-DOF tracking model
-        if len(config.q_diag) == 3:
-            q_padded = list(config.q_diag) + [0.15**2, 0.15**2, 0.05**2]
-            self.Q = np.diag(q_padded)
-        else:
-            self.Q = np.diag(config.q_diag)
-            
+        self.Q = np.diag(config.q_diag)
         self.R = np.diag(config.r_meas_diag)
         self.loop_closed = False
-        self.current_s = 0.0
+        self.current_s = 0
 
         initial_map_flat = initial_map_pts.flatten()
-        total_dim = 6 + len(initial_map_flat)  # 6-DOF Vehicle substate + N map elements
-        
-        # 1. State Allocation Layout
+        total_dim = 6 + len(initial_map_flat)
         self.X = np.zeros(total_dim)
         self.X[0:3] = initial_pose
         self.X[3:6] = np.array([0.0, 0.0, 0.0])  # Local body velocities: vx, vy, omega
         self.X[6:] = initial_map_flat
 
-        # 2. Joint Covariance Allocation Layout
-        P_init = np.diag(config.init_p_diag) if len(config.init_p_diag) == 3 else np.diag(config.init_p_diag[:3])
-        V_init = np.diag([0.1**2, 0.1**2, 0.05**2])  # Tiny velocity variance baseline
+        # 2. Initialize Single Joint Covariance Matrix
+        P_init = np.diag(config.init_p_diag)
+        V_init = np.diag(config.init_v_diag)  
         Sigma_M_init = np.eye(len(initial_map_flat)) * (0.05**2) 
+        Sigma_M_init = np.diag([0.05**2, 0.05**2, 0.08**2, 0.08**2, 0.1**2, 0.1**2])
         
         self.Sigma = np.zeros((total_dim, total_dim))
         self.Sigma[0:3, 0:3] = P_init
@@ -87,7 +62,7 @@ class EKFSLACE:
 
     @property
     def velocities(self) -> np.ndarray:
-        return self.X[3:6]  # [vx, vy, omega] -> Read directly for low level holonomic controllers
+        return self.X[3:6]
 
     @property
     def M(self) -> np.ndarray:
@@ -97,19 +72,20 @@ class EKFSLACE:
     def Sigma_M(self) -> np.ndarray:
         return self.Sigma[6:, 6:]
 
-    def _sync_loop_closure_seam(self):
-        """Enforces physical identity constraints on the wrap-around seam elements."""
-        if not self.loop_closed:
-            return
-        closure_idx = len(self.M) // 2 - 1
-        start_slot = 6
-        end_slot = 6 + 2 * closure_idx
+    def _get_polyline_properties(self, s: float) -> Tuple[np.ndarray, np.ndarray, np.ndarray, int, int, float]:
+        idx = np.clip(np.searchsorted(self.map_s, s) - 1, 0, len(self.map_s) - 2)
+        denom = self.map_s[idx+1] - self.map_s[idx]
+        u = (s - self.map_s[idx]) / denom if denom > 0 else 0.0
+
+        p0, p1 = self.M[2*idx:2*idx+2], self.M[2*idx+2:2*idx+4]
+        diff = p1 - p0
+        dist = np.linalg.norm(diff)
+        t = diff / dist if dist > 1e-6 else np.array([1.0, 0.0])
+        n = np.array([-t[1], t[0]])
         
-        # Force states to match flawlessly
-        self.X[end_slot : end_slot + 2] = self.X[start_slot : start_slot + 2]
-        # Force symmetric cross-covariance matrices to map cleanly
-        self.Sigma[end_slot : end_slot + 2, :] = self.Sigma[start_slot : start_slot + 2, :]
-        self.Sigma[:, end_slot : end_slot + 2] = self.Sigma[:, start_slot : start_slot + 2]
+        return (1 - u) * p0 + u * p1, t, n, int(idx), int(idx + 1), u
+    
+
 
     def predict_via_imu(self, imu: IMUMeasurement):
         """Propagates 6-DOF kinematics using high-rate IMU strapdown calculations."""
@@ -143,10 +119,12 @@ class EKFSLACE:
         self.Sigma[:, 0:6] = self.Sigma[:, 0:6] @ F_x.T
         self.Sigma[0:6, 0:6] += self.Q
 
-    def update_odometry(self, odom: OdomMeasurement):
-        """Correction tracking using 3-DOF Holonomic wheel encoder data (vx, vy, omega)."""
-        z_meas = np.array([odom.vx_enc, odom.vy_enc, odom.w_enc])
-        z_pred = np.array([self.X[3], self.X[4], self.X[5]])  # Pulls [vx, vy, omega] from state
+
+
+    def update_odometry(self, vx, vy, omega):
+
+        z_meas = np.array([vx, vy, omega])
+        z_pred = np.array([self.X[3], self.X[4], self.X[2]])
         
         r = z_meas - z_pred
         r[2] = normalize_angle(r[2])
@@ -155,13 +133,10 @@ class EKFSLACE:
         H = np.zeros((3, len(self.X)))
         H[0, 3] = 1.0  # vx map
         H[1, 4] = 1.0  # vy map
-        H[2, 5] = 1.0  # omega map
+        H[2, 2] = 1.0  # omega map
         
         # Safe configuration unpacking for 3-axis odometry noise
-        if len(self.cfg.odom_noise) == 2:
-            odom_noise_padded = [self.cfg.odom_noise[0], self.cfg.odom_noise[0], self.cfg.odom_noise[1]]
-        else:
-            odom_noise_padded = self.cfg.odom_noise
+        odom_noise_padded = self.cfg.odom_noise
             
         R_odom = np.diag([n**2 for n in odom_noise_padded])
         
@@ -173,19 +148,6 @@ class EKFSLACE:
         
         I_KH = np.eye(len(self.X)) - K @ H
         self.Sigma = I_KH @ self.Sigma @ I_KH.T + K @ R_odom @ K.T
-
-    def _get_polyline_properties(self, s: float) -> Tuple[np.ndarray, np.ndarray, np.ndarray, int, int, float]:
-        idx = np.clip(np.searchsorted(self.map_s, s) - 1, 0, len(self.map_s) - 2)
-        denom = self.map_s[idx+1] - self.map_s[idx]
-        u = (s - self.map_s[idx]) / denom if denom > 0 else 0.0
-
-        p0, p1 = self.M[2*idx:2*idx+2], self.M[2*idx+2:2*idx+4]
-        diff = p1 - p0
-        dist = np.linalg.norm(diff)
-        t = diff / dist if dist > 1e-6 else np.array([1.0, 0.0])
-        n = np.array([-t[1], t[0]])
-        
-        return (1 - u) * p0 + u * p1, t, n, int(idx), int(idx + 1), u
 
     def update(self, obs: Observation):
         """Process local observations and update robot and map positions jointly."""
@@ -267,7 +229,6 @@ class EKFSLACE:
         self.Sigma = I_KH @ self.Sigma @ I_KH.T + K @ self.R @ K.T
 
         self._update_and_augment_map(map_pts)
-        self._sync_loop_closure_seam()
 
     def _update_and_augment_map(self, local_obs_pts: np.ndarray):
         if len(local_obs_pts) == 0:
@@ -308,9 +269,7 @@ class EKFSLACE:
         
         I_KH_t = np.eye(len(self.X)) - K_t @ H_theta
         self.Sigma = I_KH_t @ self.Sigma @ I_KH_t.T + R_theta * (K_t @ K_t.T)
-        
-        # Sync seam directly before proceeding to map expansion checks
-        self._sync_loop_closure_seam()
+
 
         # --- 2. Check Augmentations FIRST ---
         for global_pt in global_obs_pts:
@@ -365,8 +324,6 @@ class EKFSLACE:
             
             I_KH_loc = np.eye(len(self.X)) - K_gain @ H_batch
             self.Sigma = I_KH_loc @ self.Sigma @ I_KH_loc.T + K_gain @ R_batch @ K_gain.T
-            
-            self._sync_loop_closure_seam()
            
     def _check_augmentation(self, pt: np.ndarray):
         if self.cfg.trigger_dist_edge <= 0 or len(self.M) < 4 or self.loop_closed:
@@ -450,10 +407,7 @@ class EKFSLACE:
         
         self.X = self.X[:new_dim]
         self.Sigma = self.Sigma[:new_dim, :new_dim]
-        
-        # Enforce housekeeping immediately inside the frame before returning
-        self._sync_loop_closure_seam()
-        
+                
         self.map_s = self._calc_arc_lengths(self.M.reshape(-1, 2))
         self.current_s = self._project_onto_spline(self.pose[:2], 0.0)
 
@@ -499,54 +453,50 @@ class EKFSLACE:
                 
         return best_s
 
-
 if __name__ == "__main__":
-    np.random.seed(44)
-
-    # Load reference track
+    np.random.seed(42)
+    
+    # load reference track
     gt_track = np.load('custom_gt_track_reversed.npy')
     
-    # Init configurations and simulation
-    sim_cfg, ekf_cfg, ctrl_cfg = SimConfig(), EKFConfig(), PurePursuitConfig()
+    # init sim
+    sim_cfg, ekf_cfg, controller_config = SimConfig(), EKFConfig(), PurePursuitConfig()
     sim = Sim(sim_cfg, gt_track)
-    
-    controller = PurePursuitController(ctrl_cfg) 
     obs_provider = SimCam(sim)
     
-    init_pose = np.array([gt_track[0,0], gt_track[0,1], -np.pi/2])
+    init_pose = np.array([gt_track[0,0] + 0.05, gt_track[0,1] - 0.05, -np.pi/2 + 0.02])
     init_map = np.array([gt_track[0], gt_track[8], gt_track[16]])
     
     ekf = EKFSLACE(ekf_cfg, init_pose, init_map)
     
-    # Init live visualizer engine
-    visualizer = LiveVisualizer(gt_track, map_skip_val=50, record_video=False, video_path="slace.mp4")
+    # init vis
+    visualizer = LiveVisualizer(gt_track, map_skip_val=10, record_video=False, video_path="slace.mp4")
+    controller = PurePursuitController(controller_config)
     
-    high_rate_steps = sim_cfg.sim_steps * sim.odom_stride  
-    obs_packet = None
-
-    # Initialize simulator and active tracking controller
-
-    for step in range(high_rate_steps):
-        # 1. Compute control actions independently of physics code
-        cmd_vx, cmd_vy, cmd_w = controller.compute_commands(sim.true_pose, sim.gt_track, sim.closest_idx)
-        # 2. Advance physics state by passing explicit velocity commands
-        imu_packet, odom_packet = sim.step(cmd_vx, cmd_vy, cmd_w)
-        # 3. Handle observer updates
-        ekf.predict_via_imu(imu_packet)
-        if odom_packet is not None:
-            ekf.update_odometry(odom_packet)
-        # 4. Handle asynchronous camera landmark observations
-        print("Pose: ", ekf.pose, "Velocities: ", ekf.velocities,)
-
-        if sim.is_camera_ready:
+    # loop
+    for step in range(sim_cfg.sim_steps):
+            # 1. Compute control actions
+            # Pass the robot's current estimate (ekf.pose) to the controller
+            cmd_vx, cmd_vy, cmd_w = controller.compute_commands(ekf.pose, sim.gt_track, sim.closest_idx)
+            
+            # 2. Advance physics state (ensure your Sim.step is updated to accept inputs)
+            # Assuming sim.step(vx, vy, w) returns the odometry for the EKF
+            [v_odom], [a_imu] = sim.step(cmd_vx, cmd_vy, cmd_w) 
+            
+            # 3. Handle observations
             obs_packet = obs_provider.get_observations()
-            ekf.update(obs_packet)
+            
+            # 4. EKF Prediction using the holonomic model
+            ekf.predict(*a_imu, sim_cfg.dt)
 
+            ekf.update_odometry(*v_odom)
+            # 5. EKF Update
+            ekf.update(obs_packet)
+            
             if obs_packet.loop_closure_triggered and not ekf.loop_closed:
                 print(f"--- Step {step}: LOOP CLOSED SUCCESSFULLY ---")
 
-        # 5. Refresh visualization display windows
-        visualizer.update(step, sim, ekf, obs_packet)
+            visualizer.update(step, sim, ekf, obs_packet)
         
     plt.ioff()
     plt.show()

@@ -1,6 +1,6 @@
 import numpy as np
 from typing import Tuple
-from Sim import normalize_angle
+from utils import normalize_angle
 
 class PurePursuitController:
     """
