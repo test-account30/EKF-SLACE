@@ -84,12 +84,9 @@ class EKFSLACE:
         n = np.array([-t[1], t[0]])
         
         return (1 - u) * p0 + u * p1, t, n, int(idx), int(idx + 1), u
-    
 
-
-    def predict_via_imu(self, imu: IMUMeasurement):
+    def predict_via_imu(self, ax, ay, omega, dt):
         """Propagates 6-DOF kinematics using high-rate IMU strapdown calculations."""
-        dt = imu.dt
         theta = self.X[2]
         vx, vy, omega = self.X[3], self.X[4], self.X[5]
 
@@ -97,10 +94,9 @@ class EKFSLACE:
         self.X[0] += (vx * np.cos(theta) - vy * np.sin(theta)) * dt
         self.X[1] += (vx * np.sin(theta) + vy * np.cos(theta)) * dt
         self.X[2] = normalize_angle(theta + omega * dt)
-        self.X[3] += imu.acc_x * dt
-        self.X[4] += imu.acc_y * dt
-        # FIX: Let the EKF integrate omega smoothly instead of hard overwriting it,
-        # or handle its derivative process noise properly.
+        self.X[3] += ax * dt
+        self.X[4] += ay * dt
+
         self.X[5] += 0.0  # Constant velocity model assumption between sensor updates
 
         # 2. Complete 6x6 Robot Analytical Sub-state Jacobian
@@ -124,7 +120,7 @@ class EKFSLACE:
     def update_odometry(self, vx, vy, omega):
 
         z_meas = np.array([vx, vy, omega])
-        z_pred = np.array([self.X[3], self.X[4], self.X[2]])
+        z_pred = np.array([self.X[3], self.X[4], self.X[5]])
         
         r = z_meas - z_pred
         r[2] = normalize_angle(r[2])
@@ -133,7 +129,7 @@ class EKFSLACE:
         H = np.zeros((3, len(self.X)))
         H[0, 3] = 1.0  # vx map
         H[1, 4] = 1.0  # vy map
-        H[2, 2] = 1.0  # omega map
+        H[2, 5] = 1.0  # omega map
         
         # Safe configuration unpacking for 3-axis odometry noise
         odom_noise_padded = self.cfg.odom_noise
@@ -477,18 +473,17 @@ if __name__ == "__main__":
     for step in range(sim_cfg.sim_steps):
             # 1. Compute control actions
             # Pass the robot's current estimate (ekf.pose) to the controller
-            cmd_vx, cmd_vy, cmd_w = controller.compute_commands(ekf.pose, sim.gt_track, sim.closest_idx)
+            cmd_vx, cmd_vy, cmd_w = controller.compute_commands(sim.true_pose, sim.gt_track, sim.closest_idx)
             
             # 2. Advance physics state (ensure your Sim.step is updated to accept inputs)
             # Assuming sim.step(vx, vy, w) returns the odometry for the EKF
-            [v_odom], [a_imu] = sim.step(cmd_vx, cmd_vy, cmd_w) 
+            [*v_odom], [*a_imu] = sim.step(cmd_vx, cmd_vy, cmd_w) 
             
             # 3. Handle observations
             obs_packet = obs_provider.get_observations()
             
             # 4. EKF Prediction using the holonomic model
-            ekf.predict(*a_imu, sim_cfg.dt)
-
+            ekf.predict_via_imu(*a_imu, sim_cfg.dt)
             ekf.update_odometry(*v_odom)
             # 5. EKF Update
             ekf.update(obs_packet)

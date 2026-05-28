@@ -18,17 +18,21 @@ class SimConfig:
     dt: float = 0.1
     sim_steps: int = 10000
     true_kine_noise: np.ndarray = field(default_factory=lambda: np.array([0.05, 0.02]))
-    odom_noise: np.ndarray = field(default_factory=lambda: np.array([0.003, 0.003, (0.5 * np.pi/180)])) # Vx, Vy, W
+    odom_noise: np.ndarray = field(default_factory=lambda: np.array([0.003, (0.5 * np.pi/180)])) # Vx, Vy, W
     vision_noise_std: float = 0.015
     vision_lookahead: List[int] = field(default_factory=lambda: list(range(-40, 41)))
-    imu_accel_noise: float = 0.05  # m/s^2
-    imu_gyro_noise: float = 0.01   # rad/s
+    imu_accel_noise: float = 0.01  # m/s^2
+    imu_gyro_noise: float = 0.005   # rad/s
 
 @dataclass(frozen=True)
 class EKFConfig:
     init_p_diag: np.ndarray = field(default_factory=lambda: np.array([0.1**2, 0.1**2, (1 * np.pi/180)**2]))
     init_v_diag: np.ndarray = field(default_factory=lambda: np.array([0.1**2, 0.1**2, 0.05**2]))
-    q_diag: np.ndarray = field(default_factory=lambda: np.array([0.01**2, 0.01**2, (0.5 * np.pi/180)**2]))
+    q_diag: np.ndarray = field(default_factory=lambda: np.array([
+        0.1**2, 0.1**2, (0.5 * np.pi / 180)**2, # Pose process noise
+        0.02**2, 0.02**2, 0.008**2 # IMU acceleration / velocity process noise
+    ]))
+    odom_noise: np.ndarray = field(default_factory=lambda: np.array([0.005, 0.005, (1 * np.pi/180)])) # Vx, Vy, W
     r_meas_diag: np.ndarray = field(default_factory=lambda: np.array([0.15**2, (20 * np.pi/180)**2]))
     point_cov: np.ndarray = field(default_factory=lambda: np.array([0.4**2, 0.25**2, (25 * np.pi/180)**2]))  # [Longitudinal, Lateral, Heading]
     map_process_noise: float = 0.0
