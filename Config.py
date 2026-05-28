@@ -36,7 +36,7 @@ class EKFConfig:
     # Continuous process noise diagonal for 6-DOF tracking dynamics: [x, y, theta, vx, vy, omega]
     q_diag: np.ndarray = field(default_factory=lambda: np.array([
         0.1**2, 0.1**2, (0.5 * np.pi / 180)**2, # Pose process noise
-        0.15**2, 0.15**2, 0.005**2 # IMU acceleration / velocity process noise
+        0.01**2, 0.01**2, 0.005**2 # IMU acceleration / velocity process noise
     ]))
     
     # Holonomic wheel encoder measurement noise parameters utilized by the EKF update: [vx, vy, w]

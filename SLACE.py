@@ -136,7 +136,7 @@ class EKFSLACE:
         F_x[1, 3] = np.sin(theta) * dt
         F_x[1, 4] = np.cos(theta) * dt
         F_x[2, 5] = dt
-        F_x[5, 5] = 0.95
+        F_x[5, 5] = 0.0
 
         # 3. Sparse O(N) Joint Matrix Multiplications
         self.Sigma[0:6, :] = F_x @ self.Sigma[0:6, :]
@@ -146,7 +146,7 @@ class EKFSLACE:
     def update_odometry(self, odom: OdomMeasurement):
         """Correction tracking using 3-DOF Holonomic wheel encoder data (vx, vy, omega)."""
         z_meas = np.array([odom.vx_enc, odom.vy_enc, odom.w_enc])
-        z_pred = np.array([self.X[3], self.X[4], self.X[5]])  # Pulls [vx, vy, omega] from state
+        z_pred = np.array([self.X[3], self.X[4], self.X[2]])  # Pulls [vx, vy, omega] from state
         
         r = z_meas - z_pred
         r[2] = normalize_angle(r[2])
@@ -155,7 +155,7 @@ class EKFSLACE:
         H = np.zeros((3, len(self.X)))
         H[0, 3] = 1.0  # vx map
         H[1, 4] = 1.0  # vy map
-        H[2, 5] = 1.0  # omega map
+        H[2, 2] = 1.0  # omega map
         
         # Safe configuration unpacking for 3-axis odometry noise
         if len(self.cfg.odom_noise) == 2:
@@ -536,7 +536,6 @@ if __name__ == "__main__":
         if odom_packet is not None:
             ekf.update_odometry(odom_packet)
         # 4. Handle asynchronous camera landmark observations
-        print("Pose: ", ekf.pose, "Velocities: ", ekf.velocities,)
 
         if sim.is_camera_ready:
             obs_packet = obs_provider.get_observations()
