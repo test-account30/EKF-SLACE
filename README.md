@@ -9,7 +9,11 @@ A sliding-window update scheme is used so that each measurement only affects a l
 
 Rather than aiming for globally consistent Cartesian reconstruction of the environment, SLACE is designed to maintain a locally smooth and stable Frenet-frame representation of the observed path. This makes it well-suited for finite-horizon control applications such as MPC, where local curvature and tangent consistency are more important than global map accuracy.
 
-https://github.com/user-attachments/assets/2ed6bc52-8736-458a-b4d4-5efe82431039
+
+
+https://github.com/user-attachments/assets/1e2415ac-27cc-40ef-8574-8ac989a0f37c
+
+
 
 Implementation makes use of a sliding window iteration structure to only operate on nearby points correlated to current measurements, acheiving O(1) execution time irrespective of current map size.
 
