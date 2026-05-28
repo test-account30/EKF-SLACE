@@ -4,7 +4,7 @@ from scipy.interpolate import CubicSpline
 
 REAL_WORLD_IMAGE_WIDTH_METERS = 7.0 
 
-image_path = 'image.png'
+image_path = 'tools/image.png'
 
 try:
     img = plt.imread(image_path)
@@ -69,8 +69,8 @@ s_accumulated = np.concatenate([[0], np.cumsum(distances)])
 spline_x = CubicSpline(s_accumulated, points[:, 0], bc_type="periodic")
 spline_y = CubicSpline(s_accumulated, points[:, 1], bc_type="periodic")
 
-# Sample dense tracking coordinates
-s_dense = np.linspace(0, s_accumulated[-1], 500)
+# --- CHANGED: Sample 1000 dense tracking coordinates instead of 500 ---
+s_dense = np.linspace(0, s_accumulated[-1], 1000)
 dense_track = np.vstack([spline_x(s_dense), spline_y(s_dense)]).T
 
 # -------------------------------------------------------------------------
@@ -79,7 +79,6 @@ dense_track = np.vstack([spline_x(s_dense), spline_y(s_dense)]).T
 # Flip the Y-axis calculation because image matrices count rows from the top-down,
 # but physical standard simulations treat positive Y as going UP.
 dense_track[:, 1] = img_pixel_height - dense_track[:, 1]
-
 
 # Center coordinate system so first clicked point becomes origin
 origin = dense_track[0].copy()
@@ -100,8 +99,10 @@ print(f"Track spans from Y: [{dense_track[:,1].min():.2f}m to {dense_track[:,1].
 plt.figure(figsize=(10, 7))
 # Plot path with directional arrows to verify direction swap choice
 plt.plot(dense_track[:, 0], dense_track[:, 1], 'g-', label='Track Centerline')
-plt.quiver(dense_track[:-1:40, 0], dense_track[:-1:40, 1], 
-           np.diff(dense_track[::40, 0]), np.diff(dense_track[::40, 1]), 
+
+# --- CHANGED: Updated indexing step from 40 to 80 to maintain clean arrow density ---
+plt.quiver(dense_track[:-1:80, 0], dense_track[:-1:80, 1], 
+           np.diff(dense_track[::80, 0]), np.diff(dense_track[::80, 1]), 
            color='red', scale=20, label='Direction Vector')
 plt.scatter(dense_track[0, 0], dense_track[0, 1], color='blue', s=100, zorder=5, label='Robot Start Location')
 
@@ -109,6 +110,6 @@ plt.axis('equal')
 plt.grid(True, linestyle=':')
 plt.xlabel("X (meters)")
 plt.ylabel("Y (meters)")
-plt.title("Processed Metric Track Ground Truth Verification")
+plt.title("Processed Metric Track Ground Truth Verification (1000 Points)")
 plt.legend()
 plt.show()
