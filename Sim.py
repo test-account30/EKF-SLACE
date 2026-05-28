@@ -1,7 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.animation import FFMpegWriter
-from typing import Tuple
+from typing import Tuple, NamedTuple, Optional
 from Config import *
 from SLACE import EKFSLACE
 from utils import normalize_angle
@@ -30,46 +30,66 @@ def get_covariance_ellipse(mean: np.ndarray, cov: np.ndarray, scale: float = 1.5
     rotated = np.dot(np.vstack([ellipse_x, ellipse_y]).T, R.T)
     return mean[0] + rotated[:, 0], mean[1] + rotated[:, 1]
 
+
+
 class Sim:
     def __init__(self, config: SimConfig, gt_track: np.ndarray):
         self.cfg = config
+        self.dt = (1/self.cfg.imu_update_rate)
         self.gt_track = gt_track
         self.true_pose = np.array([gt_track[0,0], gt_track[0,1], -np.pi / 2])
         self.closest_idx = 0
         self.steps = 0
         self.prev_v = np.array([0.0, 0.0])
+        self.odom_skip = int(1/(self.dt*self.cfg.odom_update_rate))
+        self.cam_skip = int(1/(self.dt*self.cfg.map_update_rate))
 
     def step(self, cmd_vx, cmd_vy, cmd_w) -> Tuple[float, float, float]:
-            """Steps physics using provided commands, returns noisy odometry."""
-            dists = np.linalg.norm(self.gt_track - self.true_pose[:2], axis=1)
-            self.closest_idx = np.argmin(dists)
-            # Apply physics/noise to the requested commands
-            vx_act = cmd_vx + np.random.normal(0, self.cfg.true_kine_noise[0])
-            vy_act = cmd_vy + np.random.normal(0, self.cfg.true_kine_noise[0])
-            w_act = cmd_w + np.random.normal(0, self.cfg.true_kine_noise[1])
-            
-            # Integrate body-frame velocities into global pose
-            theta = self.true_pose[2]
-            self.true_pose[0] += (vx_act * np.cos(theta) - vy_act * np.sin(theta)) * self.cfg.dt
-            self.true_pose[1] += (vx_act * np.sin(theta) + vy_act * np.cos(theta)) * self.cfg.dt
-            self.true_pose[2] = normalize_angle(theta + w_act * self.cfg.dt)
-            
-            self.steps += 1
-
-            v_now = np.array([vx_act, vy_act])
-            accel_body = (v_now - self.prev_v) / self.cfg.dt
-            self.prev_v = v_now
-            
-            # Add sensor noise
-            accel_imu = accel_body + np.random.normal(0, self.cfg.imu_accel_noise, 2)
-            gyro_imu = w_act + np.random.normal(0, self.cfg.imu_gyro_noise)
+        """Steps physics using provided commands, returns noisy odometry."""
+        dists = np.linalg.norm(self.gt_track - self.true_pose[:2], axis=1)
+        self.closest_idx = np.argmin(dists)
+        # Apply physics/noise to the requested commands
+        vx_act = cmd_vx + np.random.normal(0, self.cfg.true_kine_noise[0])
+        vy_act = cmd_vy + np.random.normal(0, self.cfg.true_kine_noise[0])
+        w_act = cmd_w + np.random.normal(0, self.cfg.true_kine_noise[1])
         
-            
-            # Return noisy observations (odometry)
-            return ([vx_act + np.random.normal(0, self.cfg.odom_noise[0]), 
-                    vy_act + np.random.normal(0, self.cfg.odom_noise[0]), 
-                    w_act + np.random.normal(0, self.cfg.odom_noise[1])],
-                    [*accel_imu, gyro_imu])
+        # Integrate body-frame velocities into global pose
+        theta = self.true_pose[2]
+        self.true_pose[0] += (vx_act * np.cos(theta) - vy_act * np.sin(theta)) * self.dt
+        self.true_pose[1] += (vx_act * np.sin(theta) + vy_act * np.cos(theta)) * self.dt
+        self.true_pose[2] = normalize_angle(theta + w_act * self.dt)
+    
+
+        v_now = np.array([vx_act, vy_act])
+        accel_body = (v_now - self.prev_v) / self.dt
+        self.prev_v = v_now
+        
+        # Add sensor noise
+        accel_imu = accel_body + np.random.normal(0, self.cfg.imu_accel_noise, 2)
+        
+        imu_meas = IMUMeasurement(
+            acc_x=accel_imu[0],
+            acc_y=accel_imu[1],
+            omega=w_act + np.random.normal(0, self.cfg.imu_gyro_noise),
+            dt=self.dt
+        )
+
+        odom_meas = None
+        if self.steps % self.odom_skip == 0:
+            odom_meas = OdomMeasurement(
+                vx_enc=vx_act + np.random.normal(0, self.cfg.odom_noise[0]),
+                vy_enc=vy_act + np.random.normal(0, self.cfg.odom_noise[0]),
+                w_enc=w_act + np.random.normal(0, self.cfg.odom_noise[1])
+            )
+
+        self.steps += 1
+        
+        # Return noisy observations (odometry)
+        return (imu_meas, odom_meas) 
+
+    @property
+    def is_camera_ready(self) -> bool:
+        return self.steps % self.cam_skip == 0
 
 class SimCam:
     def __init__(self, sim: Sim):
@@ -89,7 +109,7 @@ class SimCam:
         )).T
         
         dist_to_start = np.linalg.norm(self.sim.true_pose[:2] - self.sim.gt_track[0])
-        trigger_lc = dist_to_start < 0.5 and self.sim.steps > 100 and (self.sim.true_pose[0] < 0)
+        trigger_lc = dist_to_start < 0.5 and self.sim.steps > 5000 and (self.sim.true_pose[0] < 0)
         
         return Observation(local_points=local_pts, loop_closure_triggered=trigger_lc)
 
