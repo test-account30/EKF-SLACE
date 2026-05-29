@@ -8,7 +8,11 @@ The estimator uses a multirate EKF structure to fuse asynchronous IMU, wheel odo
 
 The system is designed around maintaining a locally smooth and dynamically consistent Frenet-frame representation of the observed path rather than producing globally optimal Cartesian reconstruction. This makes it well suited for local planning and finite-horizon control applications such as MPC, where local curvature consistency and stable relative geometry are more important than globally drift-free mapping.
 
-https://github.com/user-attachments/assets/1e2415ac-27cc-40ef-8574-8ac989a0f37c
+
+
+https://github.com/user-attachments/assets/d08a8cee-baf0-4849-90f0-afe031f50cbc
+
+
 
 
 The current simulated perception pipeline:
