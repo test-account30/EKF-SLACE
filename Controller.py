@@ -1,7 +1,6 @@
 import numpy as np
 from typing import Tuple
 from utils import normalize_angle
-import osqp
 import scipy.sparse as sparse
 from utils import *
 from Config import *

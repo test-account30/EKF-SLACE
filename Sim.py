@@ -1,5 +1,6 @@
 import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib.animation import FFMpegWriter
 from typing import Tuple
 from utils import normalize_angle
 from Config import *
@@ -151,9 +152,12 @@ class SimCam:
         )
 
 
+
 class LiveVisualizer:
     def __init__(self, gt_track, map_skip_val: int = 10, record_video: bool = False, video_path: str = "slace.mp4"):
         self.map_skip_val = map_skip_val
+        self.record_video = record_video
+        self.video_path = video_path
 
         if isinstance(gt_track, np.lib.npyio.NpzFile):
             self.center = gt_track["center"]
@@ -164,6 +168,12 @@ class LiveVisualizer:
 
         plt.ion()
         self.fig, self.ax = plt.subplots(figsize=(10, 7))
+
+        if self.record_video:
+            from matplotlib.animation import FFMpegWriter
+            self.video_fps = 30  # FIXED OUTPUT FPS (change if you want)
+            self.writer = FFMpegWriter(fps=self.video_fps)
+            self.writer.setup(self.fig, self.video_path, dpi=200)
 
         self.ax.plot(self.center[:, 0], self.center[:, 1],
                      'k--', alpha=0.3, label='Track centreline')
@@ -183,7 +193,6 @@ class LiveVisualizer:
         self.line_est_path, = self.ax.plot([], [], 'r--', linewidth=1.5, label='Est. Path')
         self.line_spline, = self.ax.plot([], [], 'b-o', markersize=4, label='EKF Map Spline')
         
-        # --- New MPC Planned Path Artist ---
         self.line_mpc_path, = self.ax.plot([], [], color='orange', linestyle='-', linewidth=2.5, label='MPC Plan')
         
         self.scatter_obs = self.ax.scatter([], [], c='magenta', s=15, alpha=0.7)
@@ -221,14 +230,13 @@ class LiveVisualizer:
 
         return left, right
 
+
     def update(self, step: int, sim, ekf, obs, planned_path: np.ndarray = None):
-        # Always append trajectory history at high rate
         self.true_path_x.append(sim.true_pose[0])
         self.true_path_y.append(sim.true_pose[1])
         self.est_path_x.append(ekf.pose[0])
         self.est_path_y.append(ekf.pose[1])
 
-        # Drop out early if it's not a visualization frame
         if step % self.map_skip_val != 0:
             return
 
@@ -236,18 +244,14 @@ class LiveVisualizer:
             artist.remove()
         self.ellipse_artists.clear()
 
-        # Update historical paths
         self.line_true_path.set_data(self.true_path_x, self.true_path_y)
         self.line_est_path.set_data(self.est_path_x, self.est_path_y)
 
-        # --- Safe MPC Rollout Rendering ---
         if planned_path is not None and isinstance(planned_path, np.ndarray) and planned_path.ndim == 2 and len(planned_path) > 0:
             self.line_mpc_path.set_data(planned_path[:, 0], planned_path[:, 1])
         else:
-            # Clear the old trajectory trace if no plan is supplied or if solver failed
             self.line_mpc_path.set_data([], [])
 
-        # Update Estimated Track Map Spline 
         M_pts = ekf.M.reshape(-1, 2)
         self.line_spline.set_data(M_pts[:, 0], M_pts[:, 1])
 
@@ -263,23 +267,22 @@ class LiveVisualizer:
                 color='blue', alpha=0.15
             )[0]
 
-        # Update Local Point Cloud Measurements
         if len(obs.local_points) > 0:
             c, s = np.cos(ekf.pose[2]), np.sin(ekf.pose[2])
             R = np.array([[c, -s], [s, c]])
             global_obs = ekf.pose[:2] + obs.local_points[:, :2] @ R.T
             self.scatter_obs.set_offsets(global_obs)
 
-        # Update current robot markers
         self.robot_true_dot.set_data([sim.true_pose[0]], [sim.true_pose[1]])
         self.robot_est_dot.set_data([ekf.pose[0]], [ekf.pose[1]])
 
-        # Update Covariance Ellipses
         for i in range(len(M_pts)):
             cov = ekf.Sigma_M[2*i:2*i+2, 2*i:2*i+2]
             ex, ey = get_covariance_ellipse(M_pts[i], cov)
             self.ellipse_artists.append(self.ax.plot(ex, ey, 'b-', alpha=0.2, linewidth=1)[0])
-
-        # Redraw viewport canvas
+        
         self.fig.canvas.draw()
         self.fig.canvas.flush_events()
+
+        if self.record_video:
+            self.writer.grab_frame()

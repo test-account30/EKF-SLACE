@@ -587,7 +587,7 @@ if __name__ == "__main__":
     ekf = EKFSLACE(ekf_cfg, init_pose, init_map)
     
     # init vis
-    visualizer = LiveVisualizer(gt_track, map_skip_val=100, record_video=False, video_path="slace.mp4")
+    visualizer = LiveVisualizer(gt_track, map_skip_val=100, record_video=True, video_path="slace.mp4")
     controller = PurePursuitController(controller_config)
     obs_packet = None
     # loop
