@@ -1,39 +1,34 @@
 # EKF-SLACE
-# SLACE
 
-SLACE (Simultaneous Localisation And Curve Estimation) is a lightweight EKF-based curve estimation system written in Python.
+SLACE (Simultaneous Localization And Curve Estimation) is a lightweight EKF-based curve estimation and localisation system written in Python.
 
-The system jointly estimates robot pose and a sparse centreline representation of the environment using local observations of a track boundary or line structure. Instead of discrete landmark points, the map is represented as a deformable polyline that evolves online as new measurements are incorporated.
+The system jointly estimates robot pose, body-frame velocities and a sparse centreline representation of the environment using a single shared EKF state vector. Rather than representing the environment as discrete landmarks or occupancy grids, the map is modelled as a deformable polyline that evolves online as new observations are incorporated.
 
-A sliding-window update scheme is used so that each measurement only affects a local subset of nearby map nodes. This keeps computation bounded with respect to map length, enabling near constant-time updates in practice for long trajectories.
+The estimator uses a multirate EKF structure to fuse asynchronous IMU, wheel odometry and map-based observations. High-rate IMU propagation is used for continuous motion prediction, wheel odometry updates constrain body-frame velocity estimates and lower-rate SLACE updates align local observations against the estimated map geometry.
 
-Rather than aiming for globally consistent Cartesian reconstruction of the environment, SLACE is designed to maintain a locally smooth and stable Frenet-frame representation of the observed path. This makes it well-suited for finite-horizon control applications such as MPC, where local curvature and tangent consistency are more important than global map accuracy.
-
-
+The system is designed around maintaining a locally smooth and dynamically consistent Frenet-frame representation of the observed path rather than producing globally optimal Cartesian reconstruction. This makes it well suited for local planning and finite-horizon control applications such as MPC, where local curvature consistency and stable relative geometry are more important than globally drift-free mapping.
 
 https://github.com/user-attachments/assets/1e2415ac-27cc-40ef-8574-8ac989a0f37c
 
 
-
-Implementation makes use of a sliding window iteration structure to only operate on nearby points correlated to current measurements, acheiving O(1) execution time irrespective of current map size.
-
-The current setup uses a simulated camera pipeline which:
+The current simulated perception pipeline:
 
 * samples points from a ground truth track
-* converts them into local camera observations
-* fits a local line/curve estimate
-* feeds the observations into the EKF
+* converts them into local camera-frame observations
+* extracts local line geometry using SVD
+* feeds Frenet-frame observations into the EKF
 
 The EKF then:
 
-* predicts robot motion from odometry
-* projects observations onto the estimated curve
-* updates robot pose
-* updates nearby map nodes
-* incrementally augments the map
-* performs a simple loop closure correction once the lap closes
+* propagates pose using IMU acceleration and angular velocity
+* estimates body-frame velocities
+* fuses wheel odometry measurements
+* projects observations onto the estimated polyline map
+* jointly updates robot and map states
+* incrementally augments the map online
+* performs loop closure alignment once the lap closes
 
-The estimator core is seperated from the simulation and visualisation layers so the simulated observation provider can later be replaced with real hardware or a CV pipeline.
+The estimator core is separated from the simulation and visualisation layers so the simulated observation provider can later be replaced with real hardware or a CV pipeline.
 
 ## Running
 
@@ -41,7 +36,7 @@ Install dependencies:
 
 ```bash
 pip install numpy matplotlib
-winget install "FFmpeg (Essentials Build)" 
+winget install "FFmpeg (Essentials Build)"
 ```
 
 Run the simulator:
@@ -58,211 +53,289 @@ A live visualisation window should open showing:
 * local observations
 * covariance ellipses
 
+## System Overview
+
+### State Vector
+
+SLACE uses a single shared EKF state vector containing:
+
+* robot pose
+* body-frame velocity estimates
+* deformable polyline map nodes
+
+The joint formulation allows correlations between robot motion and map geometry to be preserved directly within the covariance matrix.
+
+State structure:
+
+$$
+X =
+[x,\ y,\ \theta,\ v_x,\ v_y,\ \omega,\ m_1^x,\ m_1^y,\ ...]^T
+$$
+
+### Sensor Fusion Structure
+
+The estimator operates as a multirate EKF:
+
+| Source                | Role                                  |
+| --------------------- | ------------------------------------- |
+| IMU                   | High-rate prediction                  |
+| Wheel Odometry        | Velocity correction                   |
+| SLACE Geometry Update | Map-relative localisation and mapping |
+
+The IMU prediction step propagates pose and velocity continuously using measured accelerations and angular velocity.
+
+Wheel odometry constrains body-frame velocity drift.
+
+SLACE updates use local geometric observations extracted from nearby track structure to jointly correct both robot pose and map geometry.
+
+### Map Representation
+
+The environment is represented as a sparse polyline rather than:
+
+* occupancy grids
+* point clouds
+* spline surfaces
+* landmark graphs
+
+Each segment stores local geometric structure while remaining lightweight enough for online joint optimisation inside the EKF.
+
+Observations are projected onto nearby map segments using local arc-length parameterisation.
+
+### Observation Model
+
+Local point observations are converted into a Frenet-frame representation:
+
+$$
+z = [b,\ \theta_l]^T
+$$
+
+where:
+
+* (b) is lateral offset from the local track estimate
+* (\theta_l) is local line orientation
+
+Local line geometry is extracted using SVD over nearby observed points.
+
+### Loop Closure
+
+When the estimated trajectory returns near the starting region, the system performs a lightweight loop closure correction by enforcing consistency between the map tail and the initial anchor region.
+
+The map is then truncated and converted into a closed-loop representation.
+
 ## Notes
 
-This project is mainly experimental/research-style code rather than a polished robotics framework. The current implementation uses a sparse polyline representation rather than splines or occupancy grids.
+This project is primarily experimental/research-style code rather than a polished robotics framework.
+
+The current implementation focuses on lightweight geometric SLAM using a sparse deformable polyline representation and joint EKF estimation rather than globally optimal graph-based optimisation.
+
+The estimator architecture is intentionally modular so the simulated observation pipeline can later be replaced with real camera, lidar, or CV-based feature extraction systems.
 
 ## Appendix
 
-This section summarises the SLACE EKF formulation using a simplified and GitHub-safe notation.
+This section summarises the simplified EKF formulation used by SLACE.
 
 ---
 
-### 1. State Representation
+### 1. Joint State Representation
 
-Robot state:
-
-$$
-x = [x, y, \theta]^T
-$$
-
-Map representation (polyline nodes):
+Robot pose and velocity:
 
 $$
-M = [x_1, y_1, x_2, y_2, ..., x_N, y_N]^T
+x_r =
+[x,\ y,\ \theta,\ v_x,\ v_y,\ \omega]^T
 $$
 
-Covariances:
+Polyline map:
 
 $$
-P \in \mathbb{R}^{3 \times 3}, \quad S_M \in \mathbb{R}^{2N \times 2N}
+M =
+[x_1,\ y_1,\ x_2,\ y_2,\ ...]^T
+$$
+
+Joint EKF state:
+
+$$
+X =
+[x_r,\ M]^T
+$$
+
+Joint covariance:
+
+$$
+\Sigma \in \mathbb{R}^{N \times N}
 $$
 
 ---
 
-### 2. Motion Model (Prediction Step)
+### 2. IMU Prediction Model
+
+Pose propagation:
 
 $$
-x_{k+1} = x_k + v \Delta t \cos(\theta)
+x_{k+1} =
+x_k + (v_x \cos\theta - v_y \sin\theta)\Delta t
 $$
 
 $$
-y_{k+1} = y_k + v \Delta t \sin(\theta)
+y_{k+1} =
+y_k + (v_x \sin\theta + v_y \cos\theta)\Delta t
+$$
+
+Heading update:
+
+$$
+\theta_{k+1} =
+\theta_k + \omega \Delta t
+$$
+
+Velocity propagation:
+
+$$
+v_{x,k+1} = v_{x,k} + a_x \Delta t
 $$
 
 $$
-\theta_{k+1} = \theta_k + \omega \Delta t
+v_{y,k+1} = v_{y,k} + a_y \Delta t
 $$
 
 Covariance propagation:
 
 $$
-P = F P F^T + Q
-$$
-
-Jacobian:
-
-$$
-F =
-\begin{bmatrix}
-1 & 0 & -v \Delta t \sin(\theta) \\
-0 & 1 & v \Delta t \cos(\theta) \\
-0 & 0 & 1
-\end{bmatrix}
+\Sigma =
+F \Sigma F^T + Q
 $$
 
 ---
 
-### 3. Line Observation Model (Frenet Frame)
+### 3. Odometry Velocity Update
 
-Measurement from local point cloud:
-
-$$
-z = [b, \theta_l]^T
-$$
-
-where:
-- b = lateral offset to line
-- θ_l = local line direction
-
-Predicted measurement:
+Wheel odometry directly constrains body-frame velocity states:
 
 $$
-z_{hat} = [-C \cdot n, -atan2(t_y, t_x)]^T
+z_{odom} =
+[v_x,\ v_y,\ \omega]^T
 $$
 
 Residual:
 
 $$
-r = z - z_{hat}
+r =
+z_{odom} - \hat{z}_{odom}
+$$
+
+Kalman update:
+
+$$
+X = X + Kr
 $$
 
 ---
 
-### 4. EKF Update (Robot Pose)
+### 4. Frenet Observation Model
 
-Jacobian:
+Local line observations:
+
+$$
+z =
+[b,\ \theta_l]^T
+$$
+
+Predicted observation:
+
+$$
+\hat{z} =
+[-C \cdot n,\ -atan2(t_y,\ t_x)]^T
+$$
+
+Residual:
+
+$$
+r =
+z - \hat{z}
+$$
+
+---
+
+### 5. Joint EKF Update
+
+The observation Jacobian spans both robot and map states:
 
 $$
 H =
-\begin{bmatrix}
-n_x & n_y & 0 \\
-0 & 0 & 1
-\end{bmatrix}
+[H_r\ \ H_m]
 $$
 
 Innovation covariance:
 
 $$
-S = H P H^T + R + S_M
+S =
+H \Sigma H^T + R
 $$
 
 Kalman gain:
 
 $$
-K = P H^T S^{-1}
+K =
+\Sigma H^T S^{-1}
 $$
 
 State update:
 
 $$
-x = x + K r
+X =
+X + Kr
 $$
 
-Covariance update:
+Joseph-form covariance update:
 
 $$
-P = (I - K H) P (I - K H)^T + K R K^T
-$$
-
----
-
-### 5. Map Update (Sliding Window EKF)
-
-Global observation transform:
-
-$$
-z_{global} = [x, y] + R(\theta) z_{local}
-$$
-
-Residual:
-
-$$
-r_M = z_{global} - C(s)
-$$
-
-Map update:
-
-$$
-M_{active} = M_{active} + K_M r_M
+\Sigma =
+(I - KH)\Sigma(I - KH)^T + KRK^T
 $$
 
 ---
 
-### 6. Sliding Window
+### 6. Polyline Projection
 
-Only map nodes near current arc-length s are updated:
-
-$$
-W(s) = \{ i : |s_i - s| < w \}
-$$
-
-This gives constant-time updates:
+Observed points are projected onto nearby polyline segments using local arc-length parameterisation:
 
 $$
-O(|W|) \approx O(1)
+s^* =
+argmin_s ||p - C(s)||
 $$
+
+where:
+
+* (C(s)) is the current polyline estimate
+* (s) is arc length along the map
 
 ---
 
 ### 7. Map Augmentation
 
-New node is added when:
+New map nodes are added online when observations extend sufficiently beyond the current map frontier.
+
+New node placement:
 
 $$
-d_{forward} > d_{add}, \quad |d_{lat}| < w_{lane}
+p_{new} =
+p_{last} + d_{aug} \hat{t}
 $$
 
-New point:
+where:
 
-$$
-p_{new} = p_{last} + d_{add} t
-$$
+* (d_{aug}) is augmentation spacing
+* (\hat{t}) is estimated local tangent direction
 
 ---
 
-### 8. Loop Closure (Simple Alignment)
+### 8. Loop Closure Constraint
 
-Angle correction:
-
-$$
-d\theta = \theta_{start} - \theta_{end}
-$$
-
-Rotation:
+Loop closure applies a consistency constraint between the map tail and initial anchor:
 
 $$
-R =
-\begin{bmatrix}
-cos(d\theta) & -sin(d\theta) \\
-sin(d\theta) & cos(d\theta)
-\end{bmatrix}
+r_{lc} =
+p_{start} - p_{end}
 $$
 
-Position correction:
-
-$$
-p = R(p - p_a) + p_a + d_p
-$$
-
----
+A final EKF update distributes the correction through the joint covariance structure.
