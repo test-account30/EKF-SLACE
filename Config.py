@@ -40,16 +40,16 @@ class EKFConfig:
     point_cov: np.ndarray = field(default_factory=lambda: np.array([0.4**2, 0.25**2, (25 * np.pi/180)**2]))  # [Longitudinal, Lateral, Heading] for map measurement
 
     # Mapping Params
-    augment_dist: float = 0.25 # Spacing of map points (m)
+    augment_dist: float = 0.25 # Spacing of new map points (m)
     augment_sigma: float = 0.12 # Covarience of new map point (m**2)
     trigger_dist_edge: float = 0.02 # Distance from edge new map point is added (m)
-    lane_width_limit: float = 0.5 # Width of the track
-    loop_closure_sigma: float = 0.05 # Covarience after loop closure
-    map_init_sigma: float = 0.05 # Init covarience of map point
+    lane_width_limit: float = 0.5 # Width of the track (m)
+    loop_closure_sigma: float = 0.05 # Covarience after loop closure (m**2)
+    map_init_sigma: float = 0.05 # Init covarience of map point (m**2)
 
     #Point Cloud Handling
     map_point_decimation_factor: int = 8 # sample every nth point recieved from camera. Adjust to taste
-    frenet_sample_radius: float = 0.3 # radius of camera point around robot used to estimate its line offset (beta) and heading error (theta)
+    frenet_sample_radius: float = 0.3 # radius (m) of camera point around robot used to estimate its line offset (beta) and heading error (theta) must keep smol 2 appox linear
 
 
 
