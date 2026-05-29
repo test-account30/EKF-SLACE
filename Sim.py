@@ -30,6 +30,15 @@ def get_covariance_ellipse(mean: np.ndarray, cov: np.ndarray, scale: float = 1.5
     rotated = np.dot(np.vstack([ellipse_x, ellipse_y]).T, R.T)
     return mean[0] + rotated[:, 0], mean[1] + rotated[:, 1]
 
+def compute_frenet_frame(pts: np.ndarray) -> Tuple[np.ndarray, np.ndarray, float, float]:
+    """Computes line fit, normal, b_meas, and theta_meas from local points via SVD."""
+    mean_pt = np.mean(pts, axis=0)
+    _, _, Vh = np.linalg.svd(pts - mean_pt)
+    t = Vh[0] if Vh[0, 0] >= 0 else -Vh[0]
+    n = np.array([-t[1], t[0]])
+    b = -np.dot(mean_pt, n)
+    theta = -np.arctan2(t[1], t[0])
+    return t, n, b, theta
 
 
 class Sim:
