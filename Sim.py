@@ -42,40 +42,51 @@ def compute_frenet_frame(pts: np.ndarray) -> Tuple[np.ndarray, np.ndarray, float
 
 
 class Sim:
-    def __init__(self, config: SimConfig, gt_track: np.ndarray):
+    def __init__(self, config: SimConfig, track_data: dict):
         self.cfg = config
-        self.dt = (1/self.cfg.imu_update_rate)
-        self.gt_track = gt_track
-        self.true_pose = np.array([gt_track[0,0], gt_track[0,1], -np.pi / 2])
+        self.dt = 1 / self.cfg.imu_update_rate
+
+        self.center = track_data["center"]
+        self.left = track_data["left"]
+        self.right = track_data["right"]
+        self.width = track_data["width"]
+        self.s = track_data["s"]
+
+        # initialise pose on centreline
+        self.true_pose = np.array([
+            self.center[0, 0],
+            self.center[0, 1],
+            -np.pi / 2
+        ])
+
         self.closest_idx = 0
         self.steps = 0
         self.prev_v = np.array([0.0, 0.0])
-        self.odom_skip = int(1/(self.dt*self.cfg.odom_update_rate))
-        self.cam_skip = int(1/(self.dt*self.cfg.map_update_rate))
 
-    def step(self, cmd_vx, cmd_vy, cmd_w) -> Tuple[float, float, float]:
+        self.odom_skip = int(1 / (self.dt * self.cfg.odom_update_rate))
+        self.cam_skip = int(1 / (self.dt * self.cfg.map_update_rate))
+
+    def step(self, cmd_vx, cmd_vy, cmd_w):
         """Steps physics using provided commands, returns noisy odometry."""
-        dists = np.linalg.norm(self.gt_track - self.true_pose[:2], axis=1)
+
+        dists = np.linalg.norm(self.center - self.true_pose[:2], axis=1)
         self.closest_idx = np.argmin(dists)
-        # Apply physics/noise to the requested commands
         vx_act = cmd_vx + np.random.normal(0, self.cfg.true_kine_noise[0])
         vy_act = cmd_vy + np.random.normal(0, self.cfg.true_kine_noise[0])
-        w_act = cmd_w + np.random.normal(0, self.cfg.true_kine_noise[1])
-        
-        # Integrate body-frame velocities into global pose
+        w_act  = cmd_w  + np.random.normal(0, self.cfg.true_kine_noise[1])
+
         theta = self.true_pose[2]
+
         self.true_pose[0] += (vx_act * np.cos(theta) - vy_act * np.sin(theta)) * self.dt
         self.true_pose[1] += (vx_act * np.sin(theta) + vy_act * np.cos(theta)) * self.dt
         self.true_pose[2] = normalize_angle(theta + w_act * self.dt)
-    
 
         v_now = np.array([vx_act, vy_act])
         accel_body = (v_now - self.prev_v) / self.dt
         self.prev_v = v_now
-        
-        # Add sensor noise
+
         accel_imu = accel_body + np.random.normal(0, self.cfg.imu_accel_noise, 2)
-        
+
         imu_meas = IMUMeasurement(
             acc_x=accel_imu[0],
             acc_y=accel_imu[1],
@@ -92,9 +103,8 @@ class Sim:
             )
 
         self.steps += 1
-        
-        # Return noisy observations (odometry)
-        return (imu_meas, odom_meas) 
+
+        return imu_meas, odom_meas
 
     @property
     def is_camera_ready(self) -> bool:
@@ -105,113 +115,151 @@ class SimCam:
         self.sim = sim
 
     def get_observations(self) -> Observation:
-        """Generates synthetic local observations based on true pose."""
-        pts = self.sim.gt_track[(self.sim.closest_idx + np.array(self.sim.cfg.vision_lookahead)) % len(self.sim.gt_track)]
-        
+        """Generates synthetic local observations with width attached."""
+
+        idxs = (self.sim.closest_idx + np.array(self.sim.cfg.vision_lookahead)) % len(self.sim.center)
+        pts = self.sim.center[idxs]
+        widths = self.sim.width[idxs]
+
         dx = pts[:, 0] - self.sim.true_pose[0]
         dy = pts[:, 1] - self.sim.true_pose[1]
+
         c, s = np.cos(self.sim.true_pose[2]), np.sin(self.sim.true_pose[2])
-        
-        local_pts = np.vstack((
-            (dx * c + dy * s) + np.random.normal(0, self.sim.cfg.vision_noise_std, len(dx)),
-            (-dx * s + dy * c) + np.random.normal(0, self.sim.cfg.vision_noise_std, len(dy))
-        )).T
-        
-        dist_to_start = np.linalg.norm(self.sim.true_pose[:2] - self.sim.gt_track[0])
-        trigger_lc = dist_to_start < 0.5 and self.sim.steps > 5000 and (self.sim.true_pose[0] < 0)
-        
-        return Observation(local_points=local_pts, loop_closure_triggered=trigger_lc)
+
+        x_local = dx * c + dy * s
+        y_local = -dx * s + dy * c
+
+        x_local += np.random.normal(0, self.sim.cfg.vision_noise_std, len(dx))
+        y_local += np.random.normal(0, self.sim.cfg.vision_noise_std, len(dy))
+        widths += np.random.normal(0, self.sim.cfg.vision_noise_std, len(widths))
+
+        local_pts = np.column_stack([x_local, y_local, widths])
+
+
+        dist_to_start = np.linalg.norm(self.sim.true_pose[:2] - self.sim.center[0])
+
+        trigger_lc = (
+            dist_to_start < 0.5
+            and self.sim.steps > 5000
+            and (self.sim.true_pose[0] < 0)
+        )
+
+        return Observation(
+            local_points=local_pts,
+            loop_closure_triggered=trigger_lc
+        )
 
 
 class LiveVisualizer:
-    """Isolated rendering engine for live EKF SLACE monitoring."""
-    def __init__(self, gt_track: np.ndarray, map_skip_val: int = 10, record_video: bool = False, video_path: str = "slace.mp4"):
+    def __init__(self, gt_track, map_skip_val: int = 10, record_video: bool = False, video_path: str = "slace.mp4"):
         self.map_skip_val = map_skip_val
-        
+
+        if isinstance(gt_track, np.lib.npyio.NpzFile):
+            self.center = gt_track["center"]
+            self.width = gt_track["width"]
+        else:
+            self.center = gt_track
+            self.width = np.ones(len(gt_track)) * 0.5
+
         plt.ion()
         self.fig, self.ax = plt.subplots(figsize=(10, 7))
+
+        self.ax.plot(self.center[:, 0], self.center[:, 1],
+                     'k--', alpha=0.3, label='Track centreline')
+
+        self.track_patch = None
+        self.est_track_patch = None
         
-        # Static background
-        self.ax.plot(gt_track[:, 0], gt_track[:, 1], 'k--', alpha=0.3, label='Ground truth track')
-        
-        # Dynamic lines and scatters
-        self.line_true_path, = self.ax.plot([], [], 'g-', linewidth=2, label='Robot true trajectory')
-        self.line_est_path, = self.ax.plot([], [], 'r--', linewidth=1.5, label='EKF estimate trajectory')
-        self.line_spline, = self.ax.plot([], [], 'b-o', markersize=4, label='Estimated map')
-        self.scatter_obs = self.ax.scatter([], [], c='magenta', s=15, alpha=0.7, label='Observations')
-        
-        # Robot markers
+        # Draw ground truth ribbon once at startup
+        left, right = self._compute_ribbon(self.center, self.width)
+        poly = np.vstack([left, right[::-1]])
+        self.track_patch = self.ax.fill(
+            poly[:, 0], poly[:, 1],
+            color='grey', alpha=0.15, label='GT Track width'
+        )[0]
+
+        self.line_true_path, = self.ax.plot([], [], 'g-', linewidth=2)
+        self.line_est_path, = self.ax.plot([], [], 'r--', linewidth=1.5)
+        self.line_spline, = self.ax.plot([], [], 'b-o', markersize=4)
+        self.scatter_obs = self.ax.scatter([], [], c='magenta', s=15, alpha=0.7)
+
         self.robot_true_dot, = self.ax.plot([], [], 'go', markersize=8)
         self.robot_est_dot, = self.ax.plot([], [], 'ro', markersize=8)
-        
+
         self.ellipse_artists = []
-        
-        # Setup plot limits and aesthetics
-        self.ax.set_xlim(-7, 1.5)
-        self.ax.set_ylim(-7, 3)
+
         self.ax.set_aspect('equal')
         self.ax.grid(True, linestyle=':', alpha=0.6)
-        self.ax.legend(loc='upper left', bbox_to_anchor=(1.04, 1.0), borderaxespad=0.0, fontsize=9)
         self.ax.set_title('EKF SLACE')
-        
-        # Storage for trajectory trails
+
         self.true_path_x, self.true_path_y = [], []
         self.est_path_x, self.est_path_y = [], []
-        self.record_video = record_video
-        self.writer = None
 
-        if self.record_video:
-            self.writer = FFMpegWriter(fps=30, metadata=dict(artist="SLACE"), bitrate=1800)
-            self.writer.setup(self.fig, video_path, dpi=100)
+    def _compute_ribbon(self, P: np.ndarray, w: np.ndarray):
+        """Computes the left and right boundary points of a track ribbon."""
+        n = len(P)
+        left = np.zeros_like(P)
+        right = np.zeros_like(P)
+
+        for i in range(n):
+            p_prev = P[i - 1]
+            p_next = P[(i + 1) % n]
+
+            t = p_next - p_prev
+            t /= np.linalg.norm(t) + 1e-9
+
+            nvec = np.array([-t[1], t[0]])
+
+            left[i] = P[i] - w[i] * nvec
+            right[i] = P[i] + w[i] * nvec
+
+        return left, right
+
 
     def update(self, step: int, sim: Sim, ekf: EKFSLACE, obs: Observation):
-        """Updates the plot data buffers and redraws the canvas."""
-        # Update trajectory trails
         self.true_path_x.append(sim.true_pose[0])
         self.true_path_y.append(sim.true_pose[1])
         self.est_path_x.append(ekf.pose[0])
         self.est_path_y.append(ekf.pose[1])
-        
+
         if step % self.map_skip_val != 0:
             return
 
-        # Clear old covariance ellipses
         for artist in self.ellipse_artists:
             artist.remove()
         self.ellipse_artists.clear()
-        
-        # Update lines
+
         self.line_true_path.set_data(self.true_path_x, self.true_path_y)
         self.line_est_path.set_data(self.est_path_x, self.est_path_y)
-        
-        # Update map points
+
         M_pts = ekf.M.reshape(-1, 2)
         self.line_spline.set_data(M_pts[:, 0], M_pts[:, 1])
-        
-        # Update observations (convert local to global for plotting)
+
+        if len(M_pts) > 2: # Need at least a few points to form a sensible ribbon
+            left_est, right_est = self._compute_ribbon(M_pts, ekf.W_est)
+            poly_est = np.vstack([left_est, right_est[::-1]])
+
+            if self.est_track_patch is not None:
+                self.est_track_patch.remove()
+
+            self.est_track_patch = self.ax.fill(
+                poly_est[:, 0], poly_est[:, 1],
+                color='blue', alpha=0.2, label='Est. Track width'
+            )[0]
+
         if len(obs.local_points) > 0:
-            cos_e, sin_e = np.cos(ekf.pose[2]), np.sin(ekf.pose[2])
-            R_pose = np.array([[cos_e, -sin_e], [sin_e, cos_e]])
-            global_obs = ekf.pose[:2] + obs.local_points @ R_pose.T
+            c, s = np.cos(ekf.pose[2]), np.sin(ekf.pose[2])
+            R = np.array([[c, -s], [s, c]])
+            global_obs = ekf.pose[:2] + obs.local_points[:, :2] @ R.T
             self.scatter_obs.set_offsets(global_obs)
-        
-        # Update robot positions
+
         self.robot_true_dot.set_data([sim.true_pose[0]], [sim.true_pose[1]])
         self.robot_est_dot.set_data([ekf.pose[0]], [ekf.pose[1]])
-        
-        # Draw new covariance ellipses for map nodes
+
         for i in range(len(M_pts)):
-            cov_block = ekf.Sigma_M[2*i:2*i+2, 2*i:2*i+2]
-            ex, ey = get_covariance_ellipse(M_pts[i], cov_block)
-            ellipse_line, = self.ax.plot(ex, ey, 'b-', alpha=0.3, linewidth=1)
-            self.ellipse_artists.append(ellipse_line)
-            
+            cov = ekf.Sigma_M[2*i:2*i+2, 2*i:2*i+2]
+            ex, ey = get_covariance_ellipse(M_pts[i], cov)
+            self.ellipse_artists.append(self.ax.plot(ex, ey, 'b-', alpha=0.3, linewidth=1)[0])
+
         self.fig.canvas.draw()
         self.fig.canvas.flush_events()
-
-        if self.record_video:
-            self.writer.grab_frame()
-    
-    def close(self):
-        if self.record_video and self.writer is not None:
-            self.writer.finish()

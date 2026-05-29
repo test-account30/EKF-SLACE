@@ -45,6 +45,10 @@ class EKFSLACE:
 
         self.map_s = self._calc_arc_lengths(initial_map_pts) # Calculate the current length of the map 
 
+        num_nodes = len(initial_map_flat) // 2 # Initalise the track width estimator
+        self.W_est = np.ones(num_nodes) * config.default_width
+        self.W_var = np.ones(num_nodes) * config.width_var_init
+
     # Getters
     @property
     def pose(self) -> np.ndarray:
@@ -102,6 +106,19 @@ class EKFSLACE:
         self.Sigma[:, 0:6] = self.Sigma[:, 0:6] @ F_x.T
         self.Sigma[0:6, 0:6] += self.Q * dt
 
+    def _update_width(self, idx: int, measured_w: float, R_meas: float, Q_process: float = 1e-4):
+        """Update the map width"""
+
+        P_pred = self.W_var[idx] + Q_process # predict step (assume constant width)
+        
+        y = measured_w - self.W_est[idx]  # update step
+        S = P_pred + R_meas
+        K = P_pred / S
+        
+        # Apply
+        self.W_est[idx] = self.W_est[idx] + K * y
+        self.W_var[idx] = (1.0 - K) * P_pred
+
     def update_odom(self, odom:OdomMeasurement):
         """Update the robot state with odometry measurements"""
         vx, vy, omega = odom.vx_enc, odom.vy_enc, odom.w_enc # pull out encoder velocities
@@ -139,14 +156,16 @@ class EKFSLACE:
         
         if len(obs.local_points) == 0: # If there aren't any points being picked up by vision, skip the map update
             return
-
-        # I am assuming the camera is just dumping every point it sees on the line, which is too much info. Downsampling.
-        dists = np.linalg.norm(obs.local_points, axis=1)
+        
+        pts_xy = obs.local_points[:, :2]   # (x, y)
+        dists = np.linalg.norm(pts_xy, axis=1)
         # SVD used to estimate robot offset and heading to line, pick a cluster of points near the robot to get approx. linear line segment
-        frenet_pts = obs.local_points[dists < self.cfg.frenet_sample_radius] 
+        frenet_pts = pts_xy[dists < self.cfg.frenet_sample_radius]
 
         # Down sample map update by decimating the full vision range
         map_pts = obs.local_points[::self.cfg.map_point_decimation_factor]
+
+
 
         if len(frenet_pts) < 2: # Need at least 2 points to run SVD 
             return
@@ -245,13 +264,16 @@ class EKFSLACE:
         if len(local_obs_pts) == 0:
             return
         
+        pts_xy = local_obs_pts[:, :2]   # (x, y)
+        pts_w  = local_obs_pts[:, 2]    # width
+
         # The basic layout for this section, is first map segment near robot is updated using robot rotation measurement,
         # Then in another update step the maps lateral error using the large map span measurements is updated.
 
         # Convert the local point observations from body frame to world frame
         cos_e, sin_e = np.cos(self.pose[2]), np.sin(self.pose[2])
         R_pose = np.array([[cos_e, -sin_e], [sin_e, cos_e]])
-        global_obs_pts = self.pose[:2] + local_obs_pts @ R_pose.T 
+        global_obs_pts = self.pose[:2] + pts_xy @ R_pose.T 
 
 
         theta_track_global = normalize_angle(self.pose[2] + self._last_theta_meas) # Estimate global line orientation
@@ -310,11 +332,16 @@ class EKFSLACE:
         H_list = []
         r_list = []
 
-        for local_pt, global_pt in zip(local_obs_pts, global_obs_pts):
+        for local_pt, global_pt, w_meas in zip(pts_xy, global_obs_pts, pts_w):
             s_pt = self._project_onto_spline(global_pt, s_hint) # Get the corresponding path index of the current measurement point
             s_hint = s_pt   
             
             C_s, t_m, n_m, idx0, idx1, u = self._get_polyline_properties(s_pt) # Get the properties of that point
+
+            base_R = self.cfg.width_meas_variance
+            base_Q = self.cfg.width_process_noise
+            self._update_width(idx0, w_meas, base_R / (1.0 - u + 1e-3), base_Q)
+            self._update_width(idx1, w_meas, base_R / (u + 1e-3), base_Q)
 
             xl, yl = local_pt
             # p_world = [x, y] + R(theta) * p_local
@@ -407,8 +434,13 @@ class EKFSLACE:
             G[:, 0:3] = alpha * G_robot
             G[:, old_dim - 2 : old_dim] = (1.0 - alpha) * np.eye(2)
 
+            # update map vector
             self.X = np.concatenate([self.X, p_new])
             self.map_s.append(self.map_s[-1] + np.linalg.norm(p_new - p_last))
+            
+            # update map width vector
+            self.W_est = np.append(self.W_est, self.cfg.default_width)
+            self.W_var = np.append(self.W_var, self.cfg.width_var_init)
             
             new_Sigma = np.zeros((old_dim + 2, old_dim + 2))
             new_Sigma[:old_dim, :old_dim] = self.Sigma
@@ -456,7 +488,11 @@ class EKFSLACE:
 
         trunc_nodes = closure_idx + 1 # Remove the nodes we don't want anymore
         new_dim = 6 + 2 * trunc_nodes
-        
+
+        # Update map width
+        self.W_est = self.W_est[:trunc_nodes]
+        self.W_var = self.W_var[:trunc_nodes]
+
         # Update state vector and covarience matrix w/ their new lengths
         self.X = self.X[:new_dim]
         self.Sigma = self.Sigma[:new_dim, :new_dim] 
@@ -525,14 +561,28 @@ if __name__ == "__main__":
     np.random.seed(42)
     
     # load reference track
-    gt_track = np.load('track.npy')
+    gt_track = np.load("track_width.npz")
+
+    center = gt_track["center"]
+    left   = gt_track["left"]
+    right  = gt_track["right"]
+    width  = gt_track["width"]
+    s      = gt_track["s"]
     # init sim
     sim_cfg, ekf_cfg, controller_config = SimConfig(), EKFConfig(), PurePursuitConfig()
     sim = Sim(sim_cfg, gt_track)
     obs_provider = SimCam(sim)
     
-    init_pose = np.array([gt_track[0,0] + 0.05, gt_track[0,1] - 0.05, -np.pi/2 + 0.02])
-    init_map = np.array([gt_track[0], gt_track[10]])
+    init_pose = np.array([
+        center[0, 0] + 0.05,
+        center[0, 1] - 0.05,
+        -np.pi / 2 + 0.02
+    ])
+
+    init_map = np.array([
+        center[0],
+        center[10]
+    ])
     
     ekf = EKFSLACE(ekf_cfg, init_pose, init_map)
     
@@ -542,7 +592,7 @@ if __name__ == "__main__":
     obs_packet = None
     # loop
     for step in range(sim_cfg.sim_steps):
-        cmd_v = controller.compute_commands(sim.true_pose, sim.gt_track, sim.closest_idx)
+        cmd_v = controller.compute_commands(sim.true_pose, center, sim.closest_idx)
         imu_packet, odom_packet = sim.step(*cmd_v)
 
         ekf.predict_imu(imu_packet)

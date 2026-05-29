@@ -1,115 +1,220 @@
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.interpolate import CubicSpline
+import os
 
-REAL_WORLD_IMAGE_WIDTH_METERS = 7.0 
+REAL_WORLD_IMAGE_WIDTH_METERS = 7.0
+image_path = "tools/image.png"
 
-image_path = 'tools/image.png'
+CHECKPOINT_DIR = "track_checkpoints"
+os.makedirs(CHECKPOINT_DIR, exist_ok=True)
 
-try:
-    img = plt.imread(image_path)
-    # img.shape[1] gives the width of the image in pixels
-    img_pixel_width = img.shape[1]
-    img_pixel_height = img.shape[0]
-    print(f"Loaded image: {img_pixel_width}x{img_pixel_height} pixels.")
-except FileNotFoundError:
-    print(f"Warning: '{image_path}' not found. Using a blank canvas layout placeholder.")
-    img = np.ones((600, 800, 3))
-    img_pixel_width = 800
-    img_pixel_height = 600
+def save(name, **data):
+    path = os.path.join(CHECKPOINT_DIR, name)
+    np.savez(path, **data)
+    print(f"[saved] {path}")
 
-# Calculate exact conversion scale factor (meters per pixel)
-scale_pixel_to_meter = REAL_WORLD_IMAGE_WIDTH_METERS / img_pixel_width
-print(f"Calculated Scale Factor: {scale_pixel_to_meter:.5f} meters per pixel.")
+# ============================================================
+# LOAD IMAGE
+# ============================================================
+img = plt.imread(image_path)
+h, w = img.shape[:2]
+scale = REAL_WORLD_IMAGE_WIDTH_METERS / w
 
-# -------------------------------------------------------------------------
-# 2. Interactive Point Collection
-# -------------------------------------------------------------------------
-fig, ax = plt.subplots(figsize=(11, 8))
+# ============================================================
+# INPUT CENTRELINE (PIXELS)
+# ============================================================
+fig, ax = plt.subplots()
 ax.imshow(img)
-ax.set_title(
-    "LEFT-CLICK to place spline nodes along the track.\n"
-    "RIGHT-CLICK (or Backspace) to undo. MIDDLE-CLICK (or Enter) to finish."
-)
+ax.set_title("Click centreline (closed loop)")
 
-print("\nClick on the image window to trace the track centerline. Press Enter when finished.")
-points = plt.ginput(n=-1, timeout=0, show_clicks=True)
+pts_px = np.array(plt.ginput(n=-1, timeout=0))
 plt.close()
 
-if len(points) < 4:
-    raise ValueError("Please click at least 4 points to form a valid track loop.")
+if len(pts_px) < 4:
+    raise ValueError("Need at least 4 points")
 
-# Convert to numpy array
-points = np.array(points)
+save("01_raw.npz", pts_px=pts_px)
 
-# -------------------------------------------------------------------------
-# 3. Handle Direction Ordering Swap
-# -------------------------------------------------------------------------
-print(f"\nYou clicked {len(points)} points.")
-swap_order = input("Do you want to reverse/swap the track progression direction? (y/n): ").strip().lower()
+# ============================================================
+# WIDTH (PIXELS)
+# ============================================================
+width_px = np.ones(len(pts_px)) * (0.5 / scale)
+save("02_width.npz", width_px=width_px)
 
-if swap_order == 'y':
-    points = points[::-1, :]
-    print("-> Track point ordering reversed.")
-else:
-    print("-> Original track point ordering retained.")
+# ============================================================
+# ARC LENGTH (OPEN PARAM, CLEAN)
+# ============================================================
+d = np.diff(pts_px, axis=0)
+ds = np.linalg.norm(d, axis=1)
+s = np.concatenate([[0], np.cumsum(ds)])
+save("03_arclength.npz", s=s)
 
-# Close the loop securely
-points = np.vstack([points, points[0]])
+# ============================================================
+# SPLINE INPUT (FIXED CLOSED LOOP)
+# IMPORTANT: duplicate first point ONLY HERE
+# ============================================================
+pts_closed = np.vstack([pts_px, pts_px[0]])
+width_closed = np.append(width_px, width_px[0])
+s_closed = np.append(s, s[-1] + np.linalg.norm(pts_px[0] - pts_px[-1]))
 
-# -------------------------------------------------------------------------
-# 4. Arc-Length Parameterization & Spline Fitting
-# -------------------------------------------------------------------------
-dx = np.diff(points[:, 0])
-dy = np.diff(points[:, 1])
-distances = np.sqrt(dx**2 + dy**2)
-s_accumulated = np.concatenate([[0], np.cumsum(distances)])
+save("04_spline_inputs.npz",
+     pts_closed=pts_closed,
+     width_closed=width_closed,
+     s_closed=s_closed)
 
-# Periodic cubic spline matching pixel-space constraints
-spline_x = CubicSpline(s_accumulated, points[:, 0], bc_type="periodic")
-spline_y = CubicSpline(s_accumulated, points[:, 1], bc_type="periodic")
+# ============================================================
+# DRAG EDITOR (PIXEL SPACE)
+# ============================================================
+def compute_normals(P):
+    n = len(P)
+    T = np.zeros_like(P)
 
-# --- CHANGED: Sample 1000 dense tracking coordinates instead of 500 ---
-s_dense = np.linspace(0, s_accumulated[-1], 1000)
-dense_track = np.vstack([spline_x(s_dense), spline_y(s_dense)]).T
+    for i in range(n):
+        prev = P[i - 1]
+        nxt = P[(i + 1) % n]
+        T[i] = nxt - prev
 
-# -------------------------------------------------------------------------
-# 5. Conversion to Metric Space & Coordinate Realignment
-# -------------------------------------------------------------------------
-# Flip the Y-axis calculation because image matrices count rows from the top-down,
-# but physical standard simulations treat positive Y as going UP.
-dense_track[:, 1] = img_pixel_height - dense_track[:, 1]
+    T /= (np.linalg.norm(T, axis=1, keepdims=True) + 1e-9)
+    N = np.stack([-T[:, 1], T[:, 0]], axis=1)
+    return N
 
-# Center coordinate system so first clicked point becomes origin
-origin = dense_track[0].copy()
-dense_track -= origin
+class TrackEditor:
+    def __init__(self, pts, width, img):
+        self.pts = pts.copy()
+        self.width = width.copy()
+        self.img = img
 
-# Apply calculated exact pixel-to-meter dimensioning ratio scale
-dense_track *= scale_pixel_to_meter
+        self.fig, self.ax = plt.subplots()
+        self.ax.imshow(img)
+        self.ax.set_aspect("equal")
 
-# -------------------------------------------------------------------------
-# 6. Save & Verification Plot
-# -------------------------------------------------------------------------
-np.save('custom_gt_track.npy', dense_track)
-print(f"\nSuccess! Saved dense track layout to 'custom_gt_track.npy'.")
-print(f"Track spans from X: [{dense_track[:,0].min():.2f}m to {dense_track[:,0].max():.2f}m]")
-print(f"Track spans from Y: [{dense_track[:,1].min():.2f}m to {dense_track[:,1].max():.2f}m]")
+        self.drag_i = None
 
-# Verification Plot
-plt.figure(figsize=(10, 7))
-# Plot path with directional arrows to verify direction swap choice
-plt.plot(dense_track[:, 0], dense_track[:, 1], 'g-', label='Track Centerline')
+        self.line, = self.ax.plot([], [], "g-")
+        self.sc_c = self.ax.scatter([], [], c="red", s=40)
+        self.sc_w = self.ax.scatter([], [], c="blue", s=40)
 
-# --- CHANGED: Updated indexing step from 40 to 80 to maintain clean arrow density ---
-plt.quiver(dense_track[:-1:80, 0], dense_track[:-1:80, 1], 
-           np.diff(dense_track[::80, 0]), np.diff(dense_track[::80, 1]), 
-           color='red', scale=20, label='Direction Vector')
-plt.scatter(dense_track[0, 0], dense_track[0, 1], color='blue', s=100, zorder=5, label='Robot Start Location')
+        self.fig.canvas.mpl_connect("button_press_event", self.on_press)
+        self.fig.canvas.mpl_connect("button_release_event", self.on_release)
+        self.fig.canvas.mpl_connect("motion_notify_event", self.on_move)
 
-plt.axis('equal')
-plt.grid(True, linestyle=':')
-plt.xlabel("X (meters)")
-plt.ylabel("Y (meters)")
-plt.title("Processed Metric Track Ground Truth Verification (1000 Points)")
-plt.legend()
+        self.update()
+
+    def rebuild(self):
+        self.N = compute_normals(self.pts)
+        self.wpts = self.pts + self.width[:, None] * self.N
+
+    def update(self):
+        self.rebuild()
+        self.line.set_data(self.pts[:, 0], self.pts[:, 1])
+        self.sc_c.set_offsets(self.pts)
+        self.sc_w.set_offsets(self.wpts)
+
+        self.ax.set_xlim(0, self.img.shape[1])
+        self.ax.set_ylim(self.img.shape[0], 0)
+
+        self.fig.canvas.draw_idle()
+
+    def on_press(self, event):
+        if event.inaxes != self.ax:
+            return
+        d = np.linalg.norm(self.wpts - [event.xdata, event.ydata], axis=1)
+        self.drag_i = np.argmin(d)
+
+    def on_release(self, event):
+        self.drag_i = None
+
+    def on_move(self, event):
+        if self.drag_i is None or event.inaxes != self.ax:
+            return
+
+        p = self.pts[self.drag_i]
+        delta = np.array([event.xdata, event.ydata]) - p
+
+        self.width[self.drag_i] = np.dot(delta, self.N[self.drag_i])
+        self.update()
+
+    def run(self):
+        plt.show()
+        return self.pts, self.width
+
+editor = TrackEditor(pts_px, width_px, img)
+pts_px, width_px = editor.run()
+
+save("05_after_drag.npz", pts_px=pts_px, width_px=width_px)
+
+# ============================================================
+# FINAL CLOSED SPLINE (NO CRASH VERSION)
+# ============================================================
+pts_closed = np.vstack([pts_px, pts_px[0]])
+width_closed = np.append(width_px, width_px[0])
+
+d = np.diff(pts_closed, axis=0)
+ds = np.linalg.norm(d, axis=1)
+s_closed = np.concatenate([[0], np.cumsum(ds)])
+
+L = s_closed[-1]
+
+sx = CubicSpline(s_closed, pts_closed[:, 0], bc_type="periodic")
+sy = CubicSpline(s_closed, pts_closed[:, 1], bc_type="periodic")
+sw = CubicSpline(s_closed, width_closed, bc_type="periodic")
+
+# ============================================================
+# HIGH RES OUTPUT (>=1000)
+# ============================================================
+N_OUT = 1500
+s_dense = np.linspace(0, L, N_OUT)
+
+x = sx(s_dense)
+y = sy(s_dense)
+
+dx = sx(s_dense, 1)
+dy = sy(s_dense, 1)
+
+norm = np.sqrt(dx**2 + dy**2) + 1e-9
+tx, ty = dx / norm, dy / norm
+nx, ny = -ty, tx
+
+w = sw(s_dense)
+
+left = np.column_stack([x - w * nx, y - w * ny])
+right = np.column_stack([x + w * nx, y + w * ny])
+
+# ============================================================
+# SHIFT ORIGIN (0,0 START)
+# ============================================================
+origin = np.array([x[0], y[0]])
+
+x -= origin[0]
+y -= origin[1]
+left -= origin
+right -= origin
+
+# ============================================================
+# METRES CONVERSION
+# ============================================================
+center_m = np.column_stack([x, y]) * scale
+left_m = left * scale
+right_m = right * scale
+w_m = w * scale
+s_m = s_dense * scale
+
+save("06_output_m.npz",
+     center=center_m,
+     left=left_m,
+     right=right_m,
+     width=w_m,
+     s=s_m)
+
+# ============================================================
+# PLOT CHECK
+# ============================================================
+plt.figure()
+plt.plot(center_m[:, 0], center_m[:, 1], "g")
+plt.plot(left_m[:, 0], left_m[:, 1], "c")
+plt.plot(right_m[:, 0], right_m[:, 1], "b")
+plt.axis("equal")
+plt.grid(True)
+plt.title("FINAL CLOSED TRACK (stable + draggable widths + no spline crash)")
 plt.show()

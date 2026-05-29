@@ -51,6 +51,11 @@ class EKFConfig:
     map_point_decimation_factor: int = 8 # sample every nth point recieved from camera. Adjust to taste
     frenet_sample_radius: float = 0.3 # radius (m) of camera point around robot used to estimate its line offset (beta) and heading error (theta) must keep smol 2 appox linear
 
+    #Map Width Params
+    width_meas_variance: float = 0.02**2 # m**2
+    default_width: float = 0.5 # m
+    width_var_init: float = 0.1 # m**2
+    width_process_noise: float = 1e-4
 
 
 @dataclass(frozen=True)
