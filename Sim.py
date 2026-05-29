@@ -1,10 +1,8 @@
 import numpy as np
 import matplotlib.pyplot as plt
-from matplotlib.animation import FFMpegWriter
-from typing import Tuple, NamedTuple, Optional
-from Config import *
-from SLACE import EKFSLACE
+from typing import Tuple
 from utils import normalize_angle
+from Config import *
 
 """
 SLACE.py
@@ -56,7 +54,7 @@ class Sim:
         self.true_pose = np.array([
             self.center[0, 0],
             self.center[0, 1],
-            -np.pi / 2
+            np.pi / 2
         ])
 
         self.closest_idx = 0
@@ -113,6 +111,7 @@ class Sim:
 class SimCam:
     def __init__(self, sim: Sim):
         self.sim = sim
+        self.temp_count = 0
 
     def get_observations(self) -> Observation:
         """Generates synthetic local observations with width attached."""
@@ -120,6 +119,8 @@ class SimCam:
         idxs = (self.sim.closest_idx + np.array(self.sim.cfg.vision_lookahead)) % len(self.sim.center)
         pts = self.sim.center[idxs]
         widths = self.sim.width[idxs]
+
+        self.temp_count += 1
 
         dx = pts[:, 0] - self.sim.true_pose[0]
         dy = pts[:, 1] - self.sim.true_pose[1]
@@ -141,7 +142,7 @@ class SimCam:
         trigger_lc = (
             dist_to_start < 0.5
             and self.sim.steps > 5000
-            and (self.sim.true_pose[0] < 0)
+            and (self.sim.true_pose[1] > 0)
         )
 
         return Observation(
@@ -178,9 +179,13 @@ class LiveVisualizer:
             color='grey', alpha=0.15, label='GT Track width'
         )[0]
 
-        self.line_true_path, = self.ax.plot([], [], 'g-', linewidth=2)
-        self.line_est_path, = self.ax.plot([], [], 'r--', linewidth=1.5)
-        self.line_spline, = self.ax.plot([], [], 'b-o', markersize=4)
+        self.line_true_path, = self.ax.plot([], [], 'g-', linewidth=2, label='True Path')
+        self.line_est_path, = self.ax.plot([], [], 'r--', linewidth=1.5, label='Est. Path')
+        self.line_spline, = self.ax.plot([], [], 'b-o', markersize=4, label='EKF Map Spline')
+        
+        # --- New MPC Planned Path Artist ---
+        self.line_mpc_path, = self.ax.plot([], [], color='orange', linestyle='-', linewidth=2.5, label='MPC Plan')
+        
         self.scatter_obs = self.ax.scatter([], [], c='magenta', s=15, alpha=0.7)
 
         self.robot_true_dot, = self.ax.plot([], [], 'go', markersize=8)
@@ -190,7 +195,8 @@ class LiveVisualizer:
 
         self.ax.set_aspect('equal')
         self.ax.grid(True, linestyle=':', alpha=0.6)
-        self.ax.set_title('EKF SLACE')
+        self.ax.set_title('EKF-SLACE (PoC)')
+        self.ax.legend(loc='upper left', bbox_to_anchor=(1.02, 1.0))
 
         self.true_path_x, self.true_path_y = [], []
         self.est_path_x, self.est_path_y = [], []
@@ -215,13 +221,14 @@ class LiveVisualizer:
 
         return left, right
 
-
-    def update(self, step: int, sim: Sim, ekf: EKFSLACE, obs: Observation):
+    def update(self, step: int, sim, ekf, obs, planned_path: np.ndarray = None):
+        # Always append trajectory history at high rate
         self.true_path_x.append(sim.true_pose[0])
         self.true_path_y.append(sim.true_pose[1])
         self.est_path_x.append(ekf.pose[0])
         self.est_path_y.append(ekf.pose[1])
 
+        # Drop out early if it's not a visualization frame
         if step % self.map_skip_val != 0:
             return
 
@@ -229,13 +236,22 @@ class LiveVisualizer:
             artist.remove()
         self.ellipse_artists.clear()
 
+        # Update historical paths
         self.line_true_path.set_data(self.true_path_x, self.true_path_y)
         self.line_est_path.set_data(self.est_path_x, self.est_path_y)
 
+        # --- Safe MPC Rollout Rendering ---
+        if planned_path is not None and isinstance(planned_path, np.ndarray) and planned_path.ndim == 2 and len(planned_path) > 0:
+            self.line_mpc_path.set_data(planned_path[:, 0], planned_path[:, 1])
+        else:
+            # Clear the old trajectory trace if no plan is supplied or if solver failed
+            self.line_mpc_path.set_data([], [])
+
+        # Update Estimated Track Map Spline 
         M_pts = ekf.M.reshape(-1, 2)
         self.line_spline.set_data(M_pts[:, 0], M_pts[:, 1])
 
-        if len(M_pts) > 2: # Need at least a few points to form a sensible ribbon
+        if len(M_pts) > 2: 
             left_est, right_est = self._compute_ribbon(M_pts, ekf.W_est)
             poly_est = np.vstack([left_est, right_est[::-1]])
 
@@ -244,22 +260,26 @@ class LiveVisualizer:
 
             self.est_track_patch = self.ax.fill(
                 poly_est[:, 0], poly_est[:, 1],
-                color='blue', alpha=0.2, label='Est. Track width'
+                color='blue', alpha=0.15
             )[0]
 
+        # Update Local Point Cloud Measurements
         if len(obs.local_points) > 0:
             c, s = np.cos(ekf.pose[2]), np.sin(ekf.pose[2])
             R = np.array([[c, -s], [s, c]])
             global_obs = ekf.pose[:2] + obs.local_points[:, :2] @ R.T
             self.scatter_obs.set_offsets(global_obs)
 
+        # Update current robot markers
         self.robot_true_dot.set_data([sim.true_pose[0]], [sim.true_pose[1]])
         self.robot_est_dot.set_data([ekf.pose[0]], [ekf.pose[1]])
 
+        # Update Covariance Ellipses
         for i in range(len(M_pts)):
             cov = ekf.Sigma_M[2*i:2*i+2, 2*i:2*i+2]
             ex, ey = get_covariance_ellipse(M_pts[i], cov)
-            self.ellipse_artists.append(self.ax.plot(ex, ey, 'b-', alpha=0.3, linewidth=1)[0])
+            self.ellipse_artists.append(self.ax.plot(ex, ey, 'b-', alpha=0.2, linewidth=1)[0])
 
+        # Redraw viewport canvas
         self.fig.canvas.draw()
         self.fig.canvas.flush_events()

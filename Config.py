@@ -22,7 +22,7 @@ class SimConfig:
     true_kine_noise: np.ndarray = field(default_factory=lambda: np.array([0.05, 0.02]))
     odom_noise: np.ndarray = field(default_factory=lambda: np.array([0.05, (1 * np.pi/180)])) # Vx, Vy, W
     vision_noise_std: float = 0.015
-    vision_lookahead: List[int] = field(default_factory=lambda: list(range(-40, 41)))
+    vision_lookahead: List[int] = field(default_factory=lambda: list(range(-60, 85)))
     imu_accel_noise: float = 0.05  # m/s^2
     imu_gyro_noise: float = 0.01   # rad/s
 
@@ -48,21 +48,21 @@ class EKFConfig:
     map_init_sigma: float = 0.05 # Init covarience of map point (m**2)
 
     #Point Cloud Handling
-    map_point_decimation_factor: int = 8 # sample every nth point recieved from camera. Adjust to taste
+    map_point_decimation_factor: int = 16 # sample every nth point recieved from camera. Adjust to taste
     frenet_sample_radius: float = 0.3 # radius (m) of camera point around robot used to estimate its line offset (beta) and heading error (theta) must keep smol 2 appox linear
 
     #Map Width Params
-    width_meas_variance: float = 0.02**2 # m**2
+    width_meas_variance: float = 0.05**2 # m**2
     default_width: float = 0.5 # m
     width_var_init: float = 0.1 # m**2
-    width_process_noise: float = 1e-4
+    width_process_noise: float = 1e-4 # m**2 
 
 
 @dataclass(frozen=True)
 class PurePursuitConfig:
-    lookahead_idx: int = 15
+    lookahead_idx: int = 2
     target_v: float = 0.3
-    steering_gain: float = 12.0
+    steering_gain: float = 10.0
 
 @dataclass
 class IMUMeasurement:

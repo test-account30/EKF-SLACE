@@ -3,7 +3,7 @@ import matplotlib.pyplot as plt
 from typing import List, Tuple
 from Sim import *
 from Config import *
-from Controller import PurePursuitController
+from Controller import *
 from utils import normalize_angle
 
 """
@@ -24,7 +24,7 @@ class EKFSLACE:
         self.R = np.diag(config.r_meas_diag)
         self.loop_closed = False
         self.current_s = 0
-
+        self.seg_idx = 0
         # init the state vector of the EKF
         initial_map_flat = initial_map_pts.flatten()
         total_dim = 6 + len(initial_map_flat)
@@ -278,9 +278,9 @@ class EKFSLACE:
 
         theta_track_global = normalize_angle(self.pose[2] + self._last_theta_meas) # Estimate global line orientation
 
-        seg_idx = np.clip(np.searchsorted(self.map_s, self.current_s) - 1, 0, len(self.map_s) - 2) # Grab the map point cloest to robot
-        p0 = self.M[2*seg_idx:2*seg_idx+2] # Grab the 2 points making up that segment
-        p1 = self.M[2*seg_idx+2:2*seg_idx+4]
+        self.seg_idx = np.clip(np.searchsorted(self.map_s, self.current_s) - 1, 0, len(self.map_s) - 2) # Grab the map point cloest to robot
+        p0 = self.M[2*self.seg_idx:2*self.seg_idx+2] # Grab the 2 points making up that segment
+        p1 = self.M[2*self.seg_idx+2:2*self.seg_idx+4]
 
         dx, dy = p1[0] - p0[0], p1[1] - p0[1] # Compute the segment vector
         d2 = dx**2 + dy**2 + 1e-9 # Grab its length
@@ -292,7 +292,7 @@ class EKFSLACE:
         #
         # J_theta = d(theta_map) / d[p0_x, p0_y, p1_x, p1_y]
         J_theta = np.array([dy/d2, -dx/d2, -dy/d2, dx/d2]) # Jacobian for segment theta update
-        idx0_h, idx1_h = seg_idx, seg_idx + 1
+        idx0_h, idx1_h = self.seg_idx, self.seg_idx + 1
 
         # r_theta = theta_obs - theta_map
         # H_theta = dr_theta / d[x, y, theta, map_nodes]
@@ -576,7 +576,7 @@ if __name__ == "__main__":
     init_pose = np.array([
         center[0, 0] + 0.05,
         center[0, 1] - 0.05,
-        -np.pi / 2 + 0.02
+        np.pi / 2 + 0.02
     ])
 
     init_map = np.array([
@@ -591,24 +591,25 @@ if __name__ == "__main__":
     controller = PurePursuitController(controller_config)
     obs_packet = None
     # loop
+    cmd_v = [0,0,0]
+    mpc_trajectory = None
     for step in range(sim_cfg.sim_steps):
-        cmd_v = controller.compute_commands(sim.true_pose, center, sim.closest_idx)
+        cmd_v = controller.compute_commands(ekf.pose, ekf.M, ekf.seg_idx)       
+
         imu_packet, odom_packet = sim.step(*cmd_v)
 
         ekf.predict_imu(imu_packet)
 
         obs_packet = obs_provider.get_observations()
+
         if odom_packet is not None:
             ekf.update_odom(odom_packet)
-
+            
         if sim.is_camera_ready:
             ekf.update_SLACE(obs_packet)
-
             if obs_packet.loop_closure_triggered and not ekf.loop_closed:
                 print(f"--- Step {step}: LOOP CLOSED SUCCESSFULLY ---")
-
-        visualizer.update(step, sim, ekf, obs_packet)
-        
-    plt.ioff()
+        visualizer.update(step, sim, ekf, obs_packet, planned_path=mpc_trajectory)
+    plt.ioff() 
     plt.show()
     visualizer.close()
